@@ -1,4 +1,7 @@
-use std::{env, path::PathBuf, sync::Arc};
+use std::sync::Arc;
+
+mod cli;
+mod progress;
 
 use cherry_app::output_filename;
 use cherry_backend_raster::register_backends as register_raster_backends;
@@ -6,60 +9,11 @@ use cherry_backend_ray::register_backends as register_ray_backends;
 use cherry_core::{
     Camera, Color, Cuboid, FrameRequest, Lambertian, SceneProvider, SceneSnapshot, Sphere,
 };
-use cherry_render::{
-    render_frame, render_sequence, BackendId, BackendRegistry, NoopFrameSink, SequenceSpec,
-};
+use cherry_render::{BackendId, BackendRegistry, SequenceSpec, render_frame, render_sequence};
+use clap::Parser;
+use cli::{Cli, validate_backend};
 use nalgebra::{Point3, Vector3};
-
-struct AppConfig {
-    backend: String,
-    width: u32,
-    height: u32,
-    frames: u32,
-    samples_per_pixel: u32,
-    max_bounces: u32,
-    output_dir: PathBuf,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            backend: "ray.normal".to_string(),
-            width: 320,
-            height: 180,
-            frames: 1,
-            samples_per_pixel: 1,
-            max_bounces: 3,
-            output_dir: PathBuf::from("output"),
-        }
-    }
-}
-
-impl AppConfig {
-    fn from_args() -> Self {
-        let mut config = Self::default();
-
-        for arg in env::args().skip(1) {
-            if let Some(value) = arg.strip_prefix("--backend=") {
-                config.backend = value.to_string();
-            } else if let Some(value) = arg.strip_prefix("--width=") {
-                config.width = value.parse().unwrap_or(config.width);
-            } else if let Some(value) = arg.strip_prefix("--height=") {
-                config.height = value.parse().unwrap_or(config.height);
-            } else if let Some(value) = arg.strip_prefix("--frames=") {
-                config.frames = value.parse().unwrap_or(config.frames);
-            } else if let Some(value) = arg.strip_prefix("--spp=") {
-                config.samples_per_pixel = value.parse().unwrap_or(config.samples_per_pixel);
-            } else if let Some(value) = arg.strip_prefix("--max-bounces=") {
-                config.max_bounces = value.parse().unwrap_or(config.max_bounces);
-            } else if let Some(value) = arg.strip_prefix("--output-dir=") {
-                config.output_dir = PathBuf::from(value);
-            }
-        }
-
-        config
-    }
-}
+use progress::CliProgressSink;
 
 struct AnimatedSceneProvider {
     camera: Camera,
@@ -116,26 +70,41 @@ fn build_registry() -> BackendRegistry {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = AppConfig::from_args();
-    std::fs::create_dir_all(&config.output_dir)?;
+    let cli = Cli::parse();
+
+    if let Some(command) = cli.command {
+        println!("{}", command.todo_message());
+        return Ok(());
+    }
 
     let registry = build_registry();
-    let provider = AnimatedSceneProvider::new(config.width as f32 / config.height as f32);
+    let available_backends = registry
+        .list_ids()
+        .into_iter()
+        .map(|id| id.as_str().to_string())
+        .collect::<Vec<_>>();
+    if let Err(error) = validate_backend(&cli.backend, &available_backends) {
+        error.exit();
+    }
 
-    let backend_id = BackendId::new(config.backend.clone());
+    std::fs::create_dir_all(&cli.output_dir)?;
+
+    let provider = AnimatedSceneProvider::new(cli.width as f32 / cli.height as f32);
+
+    let backend_id = BackendId::new(cli.backend.clone());
     let request = FrameRequest {
-        width: config.width,
-        height: config.height,
+        width: cli.width,
+        height: cli.height,
         frame_index: 0,
         time: 0.0,
-        samples_per_pixel: config.samples_per_pixel,
-        max_bounces: config.max_bounces,
+        samples_per_pixel: cli.samples_per_pixel,
+        max_bounces: cli.max_bounces,
     };
 
-    if config.frames <= 1 {
-        let mut sink = NoopFrameSink;
+    if cli.frames <= 1 {
+        let mut sink = CliProgressSink::new(0, 1);
         let result = render_frame(&registry, &provider, &backend_id, &request, &mut sink)?;
-        let output = config
+        let output = cli
             .output_dir
             .join(output_filename(backend_id.as_str(), None));
         result.image.save(&output)?;
@@ -144,22 +113,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let sequence = SequenceSpec {
-        frame_count: config.frames,
+        frame_count: cli.frames,
         start_time: 0.0,
         frame_time_step: 1.0 / 24.0,
         template: request,
     };
 
+    let total_frames = cli.frames;
     let results = render_sequence(
         &registry,
         &provider,
         &backend_id,
         &sequence,
-        |_frame, _request| Box::new(NoopFrameSink),
+        |frame, _request| Box::new(CliProgressSink::new(frame, total_frames)),
     )?;
 
     for result in results {
-        let output = config.output_dir.join(output_filename(
+        let output = cli.output_dir.join(output_filename(
             backend_id.as_str(),
             Some(result.stats.frame_index),
         ));

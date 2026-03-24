@@ -21,3 +21,24 @@ Animation frames (PNG sequence):
 ```bash
 cargo run -p cherry-app -- --backend=raster.simple --frames=24
 ```
+
+The CLI now shows a live per-frame progress bar while rendering.
+
+Use `--spp` (or `--samples-per-pixel`) to control sampling:
+
+```bash
+cargo run -p cherry-app -- --backend=ray.montecarlo --spp=8 --frames=1
+```
+
+Inspect CLI options:
+
+```bash
+cargo run -p cherry-app -- --help
+```
+
+Reserved placeholder subcommands (currently TODO no-ops):
+
+```bash
+cargo run -p cherry-app -- benchmark
+cargo run -p cherry-app -- scene
+```

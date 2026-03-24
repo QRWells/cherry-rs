@@ -9,4 +9,6 @@ cherry-core = { path = "../cherry-core" }
 cherry-render = { path = "../cherry-render" }
 cherry-backend-raster = { path = "../cherry-backend-raster" }
 cherry-backend-ray = { path = "../cherry-backend-ray" }
+clap = { workspace = true, features = ["derive"] }
+indicatif.workspace = true
 nalgebra.workspace = true
