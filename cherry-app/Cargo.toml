@@ -1,0 +1,12 @@
+[package]
+name = "cherry-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cherry-core = { path = "../cherry-core" }
+cherry-render = { path = "../cherry-render" }
+cherry-backend-raster = { path = "../cherry-backend-raster" }
+cherry-backend-ray = { path = "../cherry-backend-ray" }
+nalgebra.workspace = true

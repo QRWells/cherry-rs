@@ -1,12 +1,20 @@
-[package]
-name = "cherry-rs"
+[workspace]
+members = [
+    "cherry-core",
+    "cherry-render",
+    "cherry-backend-raster",
+    "cherry-backend-ray",
+    "cherry-app",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
-[features]
-
-[dependencies]
-image = "0.24"
-rand = { version = "0.8", features = ["small_rng"] }
-rayon = "1.6"
-nalgebra = "0.32.1"
+[workspace.dependencies]
+image = "0.25"
+nalgebra = "0.34.1"
+rand = "0.10"
+rayon = "1.11"
