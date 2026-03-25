@@ -1,0 +1,11 @@
+[package]
+name = "cherry-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cherry-app = { path = "../cherry-app" }
+cherry-core = { path = "../cherry-core" }
+cherry-render = { path = "../cherry-render" }
+eframe = "0.31"

@@ -5,6 +5,7 @@ members = [
     "cherry-backend-raster",
     "cherry-backend-ray",
     "cherry-app",
+    "cherry-gui",
 ]
 resolver = "2"
 

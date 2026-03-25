@@ -131,10 +131,12 @@ mod tests {
         sink.on_event(FrameEvent::Scanline {
             y: 0,
             pixels: vec![Color::new(0.0, 0.0, 0.0)],
+            spectral: None,
         });
         sink.on_event(FrameEvent::Scanline {
             y: 1,
             pixels: vec![Color::new(0.0, 0.0, 0.0)],
+            spectral: None,
         });
 
         assert_eq!(sink.position(), 2);

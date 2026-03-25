@@ -36,6 +36,13 @@ pub struct Cli {
     )]
     pub max_bounces: u32,
 
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        value_parser = clap::value_parser!(f32)
+    )]
+    pub exposure: f32,
+
     #[arg(long, default_value = "output")]
     pub output_dir: PathBuf,
 
@@ -97,6 +104,7 @@ mod tests {
         assert_eq!(cli.frames, 1);
         assert_eq!(cli.samples_per_pixel, 1);
         assert_eq!(cli.max_bounces, 3);
+        assert_eq!(cli.exposure, 1.0);
         assert_eq!(cli.output_dir.to_string_lossy(), "output");
         assert!(cli.command.is_none());
     }
@@ -107,6 +115,12 @@ mod tests {
         let long = Cli::parse_from(["cherry-app", "--samples-per-pixel=6"]);
         assert_eq!(short.samples_per_pixel, 8);
         assert_eq!(long.samples_per_pixel, 6);
+    }
+
+    #[test]
+    fn exposure_parses() {
+        let cli = Cli::parse_from(["cherry-app", "--exposure=1.75"]);
+        assert!((cli.exposure - 1.75).abs() < f32::EPSILON);
     }
 
     #[test]

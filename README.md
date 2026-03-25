@@ -1,14 +1,16 @@
 # Cherry.rs
 
-Dual-backend renderer workspace with pluggable runtime-selected tracing methods.
+Dual-backend renderer workspace with pluggable runtime-selected tracing methods, including a
+spectral ray-tracing path.
 
 ## Workspace Crates
 
-- `cherry-core`: shared scene/camera/material/primitive types and `SceneProvider`
-- `cherry-render`: backend traits, registry, frame sink events, render orchestration
+- `cherry-core`: shared scene/camera/material/primitive types, spectral contracts/utilities, and `SceneProvider`
+- `cherry-render`: typed backend traits, runtime-erased registry, frame sink events, render orchestration
 - `cherry-backend-raster`: CPU software raster backend
-- `cherry-backend-ray`: CPU ray backends (`ray.normal`, `ray.montecarlo`) with pluggable tracer and `Accel` trait (`BruteForceAccel`)
+- `cherry-backend-ray`: CPU ray backends (`ray.normal`, `ray.montecarlo`, `ray.spectral`) with pluggable tracer and `Accel` trait (`BruteForceAccel`)
 - `cherry-app`: thin CLI runner over the library APIs
+- `cherry-gui`: native desktop GUI preview app (`eframe` + `egui`) for realtime progressive frame display
 
 ## Run
 
@@ -24,10 +26,22 @@ cargo run -p cherry-app -- --backend=raster.simple --frames=24
 
 The CLI now shows a live per-frame progress bar while rendering.
 
+Launch GUI preview app (single-frame realtime scanline preview, render controls, extension-ready layout shell):
+
+```bash
+cargo run -p cherry-gui
+```
+
 Use `--spp` (or `--samples-per-pixel`) to control sampling:
 
 ```bash
 cargo run -p cherry-app -- --backend=ray.montecarlo --spp=8 --frames=1
+```
+
+Use the spectral backend (hero wavelength sampling, CIE XYZ mapping, exposure + Reinhard):
+
+```bash
+cargo run -p cherry-app -- --backend=ray.spectral --spp=8 --exposure=1.25 --frames=1
 ```
 
 Inspect CLI options:

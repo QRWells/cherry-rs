@@ -3,11 +3,10 @@ use std::time::Duration;
 
 use cherry_core::{Camera, Color, FrameRequest, SceneProvider, SceneSnapshot};
 use cherry_render::{
-    render_frame, render_sequence, BackendCapabilities, BackendId, BackendMetadata,
-    BackendRegistry, FrameEvent, FrameSink, NoopFrameSink, RenderBackend, RenderResult,
-    RenderStats, SequenceSpec,
+    BackendCapabilities, BackendId, BackendMetadata, BackendRegistry, FrameEvent, FrameSink,
+    NoopFrameSink, PixelRadiance, RenderBackend, RenderStats, SPECTRAL_BIN_COUNT, SequenceSpec,
+    TypedRenderResult, TypedScanline, render_frame, render_sequence,
 };
-use image::RgbImage;
 use nalgebra::{Point3, Vector3};
 
 struct MockSceneProvider {
@@ -41,6 +40,8 @@ impl SceneProvider for MockSceneProvider {
 struct MockBackend;
 
 impl RenderBackend for MockBackend {
+    type Pixel = Color;
+
     fn metadata(&self) -> BackendMetadata {
         BackendMetadata {
             id: BackendId::new("mock"),
@@ -52,39 +53,87 @@ impl RenderBackend for MockBackend {
         }
     }
 
-    fn render_frame(
+    fn render_frame_typed(
         &self,
         _scene: &SceneSnapshot,
         request: &FrameRequest,
-        sink: &mut dyn FrameSink,
-    ) -> RenderResult {
-        let metadata = self.metadata();
-        sink.on_event(FrameEvent::Begin {
-            backend: metadata.clone(),
-            request: request.clone(),
-        });
-
-        let mut image = RgbImage::new(request.width, request.height);
+    ) -> TypedRenderResult<Self::Pixel> {
+        let mut scanlines = Vec::with_capacity(request.height as usize);
         for y in 0..request.height {
-            let row = vec![Color::new(0.25, 0.5, 0.75); request.width as usize];
-            sink.on_event(FrameEvent::Scanline { y, pixels: row });
-            for x in 0..request.width {
-                image.put_pixel(x, y, image::Rgb([64, 128, 191]));
-            }
+            scanlines.push(TypedScanline {
+                y,
+                pixels: vec![Color::new(0.25, 0.5, 0.75); request.width as usize],
+            });
         }
 
         let stats = RenderStats {
-            backend_id: metadata.id,
+            backend_id: BackendId::new("mock"),
             frame_index: request.frame_index,
             elapsed: Duration::from_millis(1),
             samples_per_pixel: request.samples_per_pixel,
         };
 
-        sink.on_event(FrameEvent::End {
-            stats: stats.clone(),
-        });
+        TypedRenderResult { scanlines, stats }
+    }
+}
 
-        RenderResult { image, stats }
+#[derive(Clone)]
+struct MockSpectralPixel {
+    color: Color,
+    bins: [f32; SPECTRAL_BIN_COUNT],
+}
+
+impl PixelRadiance for MockSpectralPixel {
+    fn to_rgb_color(&self) -> Color {
+        self.color
+    }
+
+    fn spectral_bins(&self) -> Option<[f32; SPECTRAL_BIN_COUNT]> {
+        Some(self.bins)
+    }
+}
+
+struct MockSpectralBackend;
+
+impl RenderBackend for MockSpectralBackend {
+    type Pixel = MockSpectralPixel;
+
+    fn metadata(&self) -> BackendMetadata {
+        BackendMetadata {
+            id: BackendId::new("mock.spectral"),
+            display_name: "Mock Spectral Backend".to_string(),
+            capabilities: BackendCapabilities {
+                progressive_updates: true,
+                gpu_ready_interface: true,
+            },
+        }
+    }
+
+    fn render_frame_typed(
+        &self,
+        _scene: &SceneSnapshot,
+        request: &FrameRequest,
+    ) -> TypedRenderResult<Self::Pixel> {
+        let mut scanlines = Vec::with_capacity(request.height as usize);
+        for y in 0..request.height {
+            let pixel = MockSpectralPixel {
+                color: Color::new(0.2, 0.3, 0.4),
+                bins: [0.1; SPECTRAL_BIN_COUNT],
+            };
+            scanlines.push(TypedScanline {
+                y,
+                pixels: vec![pixel; request.width as usize],
+            });
+        }
+
+        let stats = RenderStats {
+            backend_id: BackendId::new("mock.spectral"),
+            frame_index: request.frame_index,
+            elapsed: Duration::from_millis(1),
+            samples_per_pixel: request.samples_per_pixel,
+        };
+
+        TypedRenderResult { scanlines, stats }
     }
 }
 
@@ -111,6 +160,13 @@ impl FrameSink for CollectingSink {
 
 fn register_mock_backend(registry: &mut BackendRegistry) {
     registry.register_factory(BackendId::new("mock"), Arc::new(|| Box::new(MockBackend)));
+}
+
+fn register_mock_spectral_backend(registry: &mut BackendRegistry) {
+    registry.register_factory(
+        BackendId::new("mock.spectral"),
+        Arc::new(|| Box::new(MockSpectralBackend)),
+    );
 }
 
 #[test]
@@ -225,4 +281,52 @@ fn render_sequence_calls_snapshot_with_expected_times() {
 
     let calls = provider.calls.lock().unwrap().clone();
     assert_eq!(calls, vec![1.0, 1.25, 1.5]);
+}
+
+struct SpectralDetectSink {
+    saw_spectral_scanline: bool,
+}
+
+impl SpectralDetectSink {
+    fn new() -> Self {
+        Self {
+            saw_spectral_scanline: false,
+        }
+    }
+}
+
+impl FrameSink for SpectralDetectSink {
+    fn on_event(&mut self, event: FrameEvent) {
+        if let FrameEvent::Scanline { spectral, .. } = event {
+            self.saw_spectral_scanline |= spectral.is_some();
+        }
+    }
+}
+
+#[test]
+fn spectral_backend_scanline_emits_optional_spectral_payload() {
+    let mut registry = BackendRegistry::new();
+    register_mock_spectral_backend(&mut registry);
+    let provider = MockSceneProvider::new();
+
+    let request = FrameRequest {
+        width: 3,
+        height: 2,
+        frame_index: 0,
+        time: 0.0,
+        samples_per_pixel: 1,
+        max_bounces: 1,
+    };
+
+    let mut sink = SpectralDetectSink::new();
+    let _ = render_frame(
+        &registry,
+        &provider,
+        &BackendId::new("mock.spectral"),
+        &request,
+        &mut sink,
+    )
+    .unwrap();
+
+    assert!(sink.saw_spectral_scanline);
 }

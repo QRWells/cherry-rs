@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use crate::{BackendId, RenderBackend};
+use crate::{BackendId, ErasedRenderBackend};
 
-pub type BackendFactory = Arc<dyn Fn() -> Box<dyn RenderBackend> + Send + Sync>;
+pub type BackendFactory = Arc<dyn Fn() -> Box<dyn ErasedRenderBackend> + Send + Sync>;
 
 pub struct BackendRegistry {
     factories: std::collections::HashMap<BackendId, BackendFactory>,
@@ -23,7 +23,7 @@ impl BackendRegistry {
         self.factories.contains_key(backend_id)
     }
 
-    pub fn create(&self, backend_id: &BackendId) -> Option<Box<dyn RenderBackend>> {
+    pub fn create(&self, backend_id: &BackendId) -> Option<Box<dyn ErasedRenderBackend>> {
         self.factories.get(backend_id).map(|factory| factory())
     }
 

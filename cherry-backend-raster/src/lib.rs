@@ -2,8 +2,8 @@ use std::{sync::Arc, time::Instant};
 
 use cherry_core::{Color, FrameRequest, SceneSnapshot};
 use cherry_render::{
-    color_to_rgb8, BackendCapabilities, BackendId, BackendMetadata, BackendRegistry, FrameEvent,
-    FrameSink, RenderBackend, RenderResult, RenderStats,
+    BackendCapabilities, BackendId, BackendMetadata, BackendRegistry, RenderBackend, RenderStats,
+    TypedRenderResult, TypedScanline,
 };
 use nalgebra::Vector2;
 
@@ -32,6 +32,8 @@ impl Default for RasterBackend {
 }
 
 impl RenderBackend for RasterBackend {
+    type Pixel = Color;
+
     fn metadata(&self) -> BackendMetadata {
         BackendMetadata {
             id: BackendId::new(RASTER_BACKEND_ID),
@@ -43,50 +45,35 @@ impl RenderBackend for RasterBackend {
         }
     }
 
-    fn render_frame(
+    fn render_frame_typed(
         &self,
         scene: &SceneSnapshot,
         request: &FrameRequest,
-        sink: &mut dyn FrameSink,
-    ) -> RenderResult {
-        let metadata = self.metadata();
-        sink.on_event(FrameEvent::Begin {
-            backend: metadata.clone(),
-            request: request.clone(),
-        });
-
+    ) -> TypedRenderResult<Self::Pixel> {
         let start = Instant::now();
-        let mut image = image::RgbImage::new(request.width, request.height);
+        let mut scanlines = Vec::with_capacity(request.height as usize);
 
         for y in 0..request.height {
-            let mut scanline = Vec::with_capacity(request.width as usize);
+            let mut pixels = Vec::with_capacity(request.width as usize);
             for x in 0..request.width {
                 let uv = Vector2::new(
                     (x as f32 + 0.5) / request.width as f32,
                     (y as f32 + 0.5) / request.height as f32,
                 );
                 let color = Self::shade_pixel(scene, uv);
-                scanline.push(color);
-                image.put_pixel(x, y, color_to_rgb8(color));
+                pixels.push(color);
             }
-            sink.on_event(FrameEvent::Scanline {
-                y,
-                pixels: scanline,
-            });
+            scanlines.push(TypedScanline { y, pixels });
         }
 
         let stats = RenderStats {
-            backend_id: metadata.id,
+            backend_id: BackendId::new(RASTER_BACKEND_ID),
             frame_index: request.frame_index,
             elapsed: start.elapsed(),
             samples_per_pixel: request.samples_per_pixel,
         };
 
-        sink.on_event(FrameEvent::End {
-            stats: stats.clone(),
-        });
-
-        RenderResult { image, stats }
+        TypedRenderResult { scanlines, stats }
     }
 }
 

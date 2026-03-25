@@ -1,73 +1,12 @@
-use std::sync::Arc;
-
 mod cli;
 mod progress;
 
-use cherry_app::output_filename;
-use cherry_backend_raster::register_backends as register_raster_backends;
-use cherry_backend_ray::register_backends as register_ray_backends;
-use cherry_core::{
-    Camera, Color, Cuboid, FrameRequest, Lambertian, SceneProvider, SceneSnapshot, Sphere,
-};
-use cherry_render::{BackendId, BackendRegistry, SequenceSpec, render_frame, render_sequence};
+use cherry_app::{build_animated_scene_provider, build_registry, output_filename};
+use cherry_core::FrameRequest;
+use cherry_render::{BackendId, SequenceSpec, render_frame, render_sequence};
 use clap::Parser;
 use cli::{Cli, validate_backend};
-use nalgebra::{Point3, Vector3};
 use progress::CliProgressSink;
-
-struct AnimatedSceneProvider {
-    camera: Camera,
-    sphere_material: Arc<dyn cherry_core::Material>,
-    box_material: Arc<dyn cherry_core::Material>,
-}
-
-impl AnimatedSceneProvider {
-    fn new(aspect_ratio: f32) -> Self {
-        let camera = Camera::new(
-            Point3::new(0.0, 0.7, 5.0),
-            Point3::new(0.0, 0.0, 0.0),
-            Vector3::y_axis().into_inner(),
-            45.0,
-            aspect_ratio,
-            0.0,
-            1.0,
-        );
-
-        Self {
-            camera,
-            sphere_material: Arc::new(Lambertian::new(Color::new(0.9, 0.3, 0.3))),
-            box_material: Arc::new(Lambertian::new(Color::new(0.2, 0.5, 0.9))),
-        }
-    }
-}
-
-impl SceneProvider for AnimatedSceneProvider {
-    fn snapshot(&self, time: f32) -> SceneSnapshot {
-        let mut scene =
-            SceneSnapshot::new(self.camera.clone()).with_background(Color::new(0.05, 0.07, 0.1));
-
-        scene.add_primitive(Arc::new(Sphere::new(
-            Point3::new(time.sin() * 0.6, 0.0, 0.0),
-            0.8,
-            Arc::clone(&self.sphere_material),
-        )));
-
-        scene.add_primitive(Arc::new(Cuboid::new(
-            Point3::new(-1.3, -1.2, -1.2),
-            Point3::new(1.3, -0.9, 1.2),
-            Arc::clone(&self.box_material),
-        )));
-
-        scene
-    }
-}
-
-fn build_registry() -> BackendRegistry {
-    let mut registry = BackendRegistry::new();
-    register_raster_backends(&mut registry);
-    register_ray_backends(&mut registry);
-    registry
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -77,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let registry = build_registry();
+    let registry = build_registry(cli.exposure);
     let available_backends = registry
         .list_ids()
         .into_iter()
@@ -89,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&cli.output_dir)?;
 
-    let provider = AnimatedSceneProvider::new(cli.width as f32 / cli.height as f32);
+    let provider = build_animated_scene_provider(cli.width as f32 / cli.height as f32);
 
     let backend_id = BackendId::new(cli.backend.clone());
     let request = FrameRequest {
