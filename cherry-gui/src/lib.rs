@@ -203,10 +203,9 @@ impl GuiState {
                     total_scanlines,
                     ..
                 } = &mut self.status
+                    && *scanlines_done < *total_scanlines
                 {
-                    if *scanlines_done < *total_scanlines {
-                        *scanlines_done += 1;
-                    }
+                    *scanlines_done += 1;
                 }
 
                 preview_dirty
@@ -266,10 +265,10 @@ impl CherryGuiApp {
             .collect::<Vec<_>>();
 
         let mut state = GuiState::new(RenderParams::default());
-        if !backend_options.contains(&state.params.backend_id) {
-            if let Some(first) = backend_options.first() {
-                state.params.backend_id = first.clone();
-            }
+        if !backend_options.contains(&state.params.backend_id)
+            && let Some(first) = backend_options.first()
+        {
+            state.params.backend_id = first.clone();
         }
 
         Self {
