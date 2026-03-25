@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use cherry_app::{build_animated_scene_provider, build_registry};
+use cherry_app::{DEFAULT_SPECTRAL_EXPOSURE, build_animated_scene_provider, build_registry};
 use cherry_core::{Color, FrameRequest};
 use cherry_render::{BackendId, FrameEvent, FrameSink, RenderStats, color_to_rgb8, render_frame};
 use eframe::egui;
@@ -228,7 +228,7 @@ impl GuiState {
 }
 
 pub fn run_render_job(params: RenderParams, tx: Sender<WorkerMessage>) {
-    let registry = build_registry(1.0);
+    let registry = build_registry(DEFAULT_SPECTRAL_EXPOSURE);
     let provider = build_animated_scene_provider(params.width as f32 / params.height as f32);
     let backend_id = BackendId::new(params.backend_id);
 
@@ -258,7 +258,7 @@ struct CherryGuiApp {
 
 impl CherryGuiApp {
     fn new() -> Self {
-        let backend_options = build_registry(1.0)
+        let backend_options = build_registry(DEFAULT_SPECTRAL_EXPOSURE)
             .list_ids()
             .into_iter()
             .map(|id| id.as_str().to_string())

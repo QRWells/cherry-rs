@@ -38,7 +38,7 @@ pub struct Cli {
 
     #[arg(
         long,
-        default_value_t = 1.0,
+        default_value_t = cherry_app::DEFAULT_SPECTRAL_EXPOSURE,
         value_parser = clap::value_parser!(f32)
     )]
     pub exposure: f32,
@@ -104,7 +104,7 @@ mod tests {
         assert_eq!(cli.frames, 1);
         assert_eq!(cli.samples_per_pixel, 1);
         assert_eq!(cli.max_bounces, 3);
-        assert_eq!(cli.exposure, 1.0);
+        assert_eq!(cli.exposure, 0.2);
         assert_eq!(cli.output_dir.to_string_lossy(), "output");
         assert!(cli.command.is_none());
     }

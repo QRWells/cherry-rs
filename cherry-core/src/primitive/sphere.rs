@@ -2,16 +2,16 @@ use std::sync::Arc;
 
 use nalgebra::Point3;
 
-use crate::{intersection::Hit, material::Material, primitive::Primitive, ray::Ray};
+use crate::{intersection::Hit, material::Bsdf, primitive::Primitive, ray::Ray};
 
 pub struct Sphere {
     pub center: Point3<f32>,
     pub radius: f32,
-    pub material: Arc<dyn Material>,
+    pub material: Arc<dyn Bsdf>,
 }
 
 impl Sphere {
-    pub fn new(center: Point3<f32>, radius: f32, material: Arc<dyn Material>) -> Self {
+    pub fn new(center: Point3<f32>, radius: f32, material: Arc<dyn Bsdf>) -> Self {
         Self {
             center,
             radius,

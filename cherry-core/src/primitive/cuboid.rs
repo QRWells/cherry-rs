@@ -2,16 +2,16 @@ use std::sync::Arc;
 
 use nalgebra::{Point3, Vector3};
 
-use crate::{intersection::Hit, material::Material, primitive::Primitive, ray::Ray};
+use crate::{intersection::Hit, material::Bsdf, primitive::Primitive, ray::Ray};
 
 pub struct Cuboid {
     pub min: Point3<f32>,
     pub max: Point3<f32>,
-    pub material: Arc<dyn Material>,
+    pub material: Arc<dyn Bsdf>,
 }
 
 impl Cuboid {
-    pub fn new(min: Point3<f32>, max: Point3<f32>, material: Arc<dyn Material>) -> Self {
+    pub fn new(min: Point3<f32>, max: Point3<f32>, material: Arc<dyn Bsdf>) -> Self {
         Self { min, max, material }
     }
 }

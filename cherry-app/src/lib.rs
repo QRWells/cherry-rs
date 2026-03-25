@@ -3,17 +3,20 @@ use std::sync::Arc;
 use cherry_backend_raster::register_backends as register_raster_backends;
 use cherry_backend_ray::register_backends_with_exposure as register_ray_backends_with_exposure;
 use cherry_core::{
-    Camera, Color, Cuboid, Lambertian, PointSpectralLight, SceneProvider, SceneSnapshot,
+    Bsdf, Camera, Color, Cuboid, GltfMrBsdf, PointSpectralLight, SceneProvider, SceneSnapshot,
 };
 use cherry_render::BackendRegistry;
 use nalgebra::{Point3, Vector3};
 
+pub const DEFAULT_SPECTRAL_EXPOSURE: f32 = 0.2;
+
 pub struct AnimatedSceneProvider {
     camera: Camera,
-    white_material: Arc<dyn cherry_core::Material>,
-    red_material: Arc<dyn cherry_core::Material>,
-    green_material: Arc<dyn cherry_core::Material>,
-    block_material: Arc<dyn cherry_core::Material>,
+    white_material: Arc<dyn Bsdf>,
+    red_material: Arc<dyn Bsdf>,
+    green_material: Arc<dyn Bsdf>,
+    metal_material: Arc<dyn Bsdf>,
+    glass_material: Arc<dyn Bsdf>,
 }
 
 impl AnimatedSceneProvider {
@@ -30,10 +33,23 @@ impl AnimatedSceneProvider {
 
         Self {
             camera,
-            white_material: Arc::new(Lambertian::new(Color::new(0.73, 0.73, 0.73))),
-            red_material: Arc::new(Lambertian::new(Color::new(0.63, 0.07, 0.06))),
-            green_material: Arc::new(Lambertian::new(Color::new(0.14, 0.45, 0.09))),
-            block_material: Arc::new(Lambertian::new(Color::new(0.7, 0.7, 0.7))),
+            white_material: Arc::new(GltfMrBsdf::opaque(Color::new(0.73, 0.73, 0.73), 0.0, 0.55)),
+            red_material: Arc::new(GltfMrBsdf::opaque(Color::new(0.63, 0.07, 0.06), 0.0, 0.6)),
+            green_material: Arc::new(GltfMrBsdf::opaque(Color::new(0.14, 0.45, 0.09), 0.0, 0.6)),
+            metal_material: Arc::new(GltfMrBsdf::new(
+                Color::new(0.82, 0.82, 0.8),
+                1.0,
+                0.2,
+                Color::new(0.0, 0.0, 0.0),
+                0.0,
+                1.5,
+            )),
+            glass_material: Arc::new(GltfMrBsdf::transmissive(
+                Color::new(0.95, 0.97, 1.0),
+                0.08,
+                1.0,
+                1.5,
+            )),
         }
     }
 }
@@ -71,17 +87,17 @@ impl SceneProvider for AnimatedSceneProvider {
         scene.add_primitive(Arc::new(Cuboid::new(
             Point3::new(-0.65, -1.0, -0.35),
             Point3::new(-0.1, -0.2, 0.3),
-            Arc::clone(&self.block_material),
+            Arc::clone(&self.metal_material),
         )));
         scene.add_primitive(Arc::new(Cuboid::new(
             Point3::new(0.2, -1.0, -0.7),
             Point3::new(0.7, 0.55, -0.1),
-            Arc::clone(&self.block_material),
+            Arc::clone(&self.glass_material),
         )));
 
         scene.add_light(Arc::new(PointSpectralLight::from_rgb(
             Point3::new(0.0, 0.85, 0.0),
-            Color::new(4.0, 4.0, 4.0),
+            Color::new(1.2, 1.2, 1.2),
         )));
 
         scene

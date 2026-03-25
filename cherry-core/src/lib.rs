@@ -15,13 +15,17 @@ pub use color::Color;
 pub use frame::FrameRequest;
 pub use intersection::Hit;
 pub use light::{DirectionalSpectralLight, Light, PointSpectralLight, SpectralLight};
-pub use material::{Lambertian, Material, SpectralLambertian, SpectralMaterial};
+pub use material::{
+    Bsdf, BsdfEvalQuery, BsdfLobeKind, BsdfSampleInput, BsdfSampleQuery, BsdfSampleRgb,
+    BsdfSampleSpectral, GltfMrBsdf,
+};
 pub use primitive::{Cuboid, Primitive, Sphere};
 pub use ray::Ray;
 pub use scene::{SceneProvider, SceneSnapshot, StaticSceneProvider};
 pub use spectral::{
     SampledSpectrum, SpectralCurve, WAVELENGTH_BIN_COUNT, WAVELENGTH_BIN_STEP_NM,
     WAVELENGTH_MAX_NM, WAVELENGTH_MIN_NM, Wavelength, apply_exposure_reinhard,
-    cie_xyz_from_wavelength, rgb_to_emission_at_nm, rgb_to_emission_spectrum,
-    rgb_to_reflectance_at_nm, rgb_to_reflectance_spectrum, xyz_to_linear_srgb,
+    bin_index_for_wavelength, cie_xyz_from_wavelength, rgb_to_emission_at_nm,
+    rgb_to_emission_spectrum, rgb_to_reflectance_at_nm, rgb_to_reflectance_spectrum,
+    wavelength_for_bin, xyz_to_linear_srgb,
 };

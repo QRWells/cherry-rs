@@ -1,12 +1,13 @@
 mod accel;
 mod tracer;
 
-use std::{f32::consts::PI, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use accel::{Accel, BruteForceAccel};
 use cherry_core::{
-    Color, FrameRequest, Ray, SceneSnapshot, WAVELENGTH_MAX_NM, WAVELENGTH_MIN_NM,
-    apply_exposure_reinhard, cie_xyz_from_wavelength, rgb_to_reflectance_at_nm, xyz_to_linear_srgb,
+    BsdfEvalQuery, BsdfSampleInput, BsdfSampleQuery, Color, FrameRequest, Ray, SceneSnapshot,
+    WAVELENGTH_MAX_NM, WAVELENGTH_MIN_NM, apply_exposure_reinhard, cie_xyz_from_wavelength,
+    xyz_to_linear_srgb,
 };
 use cherry_render::{
     BackendCapabilities, BackendId, BackendMetadata, BackendRegistry, PixelRadiance, RenderBackend,
@@ -20,6 +21,7 @@ pub use accel::{Accel as RayAccel, BruteForceAccel as RayBruteForceAccel};
 pub const RAY_NORMAL_BACKEND_ID: &str = "ray.normal";
 pub const RAY_MONTE_CARLO_BACKEND_ID: &str = "ray.montecarlo";
 pub const RAY_SPECTRAL_BACKEND_ID: &str = "ray.spectral";
+const RAY_EPSILON: f32 = 1e-6;
 
 #[derive(Debug, Clone, Copy)]
 pub enum TraceMethod {
@@ -317,10 +319,27 @@ fn sample_wavelength(seed: u64) -> f32 {
     WAVELENGTH_MIN_NM + (WAVELENGTH_MAX_NM - WAVELENGTH_MIN_NM) * hash01(seed ^ 0x3141_5926)
 }
 
+fn bsdf_sample_input(seed: u64, depth: u32) -> BsdfSampleInput {
+    BsdfSampleInput {
+        lobe: hash01(seed ^ ((depth as u64 + 1) * 0x1a2b_3c4d)),
+        u1: hash01(seed ^ ((depth as u64 + 1) * 0x5566_7788)),
+        u2: hash01(seed ^ ((depth as u64 + 1) * 0x99aa_bbcc)),
+    }
+}
+
 fn spectral_bin_for_wavelength(wavelength_nm: f32) -> usize {
     let step = (WAVELENGTH_MAX_NM - WAVELENGTH_MIN_NM) / (SPECTRAL_BIN_COUNT as f32 - 1.0);
     let index = ((wavelength_nm - WAVELENGTH_MIN_NM) / step).round() as i32;
     index.clamp(0, SPECTRAL_BIN_COUNT as i32 - 1) as usize
+}
+
+fn offset_origin(point: Point3<f32>, normal: Vector3<f32>, direction: Vector3<f32>) -> Point3<f32> {
+    let sign = if normal.dot(&direction) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    point + normal * (sign * 1e-3)
 }
 
 fn trace_spectral_wavelength(
@@ -341,13 +360,10 @@ fn trace_spectral_wavelength(
         None => return scene.background_at_nm(wavelength_nm),
     };
 
-    let hit_origin = hit.point + hit.normal * 1e-3;
-    let reflectance = hit
-        .material
-        .as_spectral()
-        .map(|material| material.reflectance_at_nm(wavelength_nm))
-        .unwrap_or_else(|| rgb_to_reflectance_at_nm(hit.material.albedo(), wavelength_nm))
-        .clamp(0.0, 1.0);
+    let normal = hit.normal.normalize();
+    let outgoing = (-ray.dir).normalize();
+    let hit_origin = offset_origin(hit.point, normal, outgoing);
+    let emission = hit.material.emissive_at_nm(wavelength_nm);
 
     let mut direct = 0.0;
     for light in &scene.lights {
@@ -359,31 +375,52 @@ fn trace_spectral_wavelength(
             continue;
         };
 
-        let cosine = hit.normal.dot(&sample.direction_to_light).max(0.0);
+        let incoming = sample.direction_to_light.normalize();
+        let cosine = normal.dot(&incoming).max(0.0);
         if cosine <= 0.0 {
             continue;
         }
 
-        let shadowed = is_shadowed(
-            accel,
-            scene,
-            hit_origin,
-            sample.direction_to_light,
-            sample.distance,
-        );
+        let shadowed = is_shadowed(accel, scene, hit_origin, incoming, sample.distance);
         if shadowed {
             continue;
         }
 
-        direct += sample.irradiance_at_nm * reflectance * cosine / PI;
+        let eval = hit.material.eval_spectral(
+            &BsdfEvalQuery {
+                normal,
+                outgoing,
+                incoming,
+            },
+            wavelength_nm,
+        );
+        direct += sample.irradiance_at_nm * eval * cosine;
     }
 
     if depth + 1 >= request.max_bounces.max(1) {
-        return direct;
+        return (emission + direct).max(0.0);
     }
 
-    let bounce_direction = sample_cosine_weighted_hemisphere(hit.normal, seed ^ depth as u64);
-    let bounce_ray = Ray::new(hit_origin, bounce_direction);
+    let sample_query = BsdfSampleQuery { normal, outgoing };
+    let sample_input = bsdf_sample_input(seed, depth);
+    let Some(sampled) = hit
+        .material
+        .sample_spectral(&sample_query, sample_input, wavelength_nm)
+    else {
+        return (emission + direct).max(0.0);
+    };
+
+    if sampled.pdf <= RAY_EPSILON {
+        return (emission + direct).max(0.0);
+    }
+
+    let cosine = normal.dot(&sampled.incoming).abs();
+    if cosine <= RAY_EPSILON {
+        return (emission + direct).max(0.0);
+    }
+
+    let bounce_origin = offset_origin(hit.point, normal, sampled.incoming);
+    let bounce_ray = Ray::new(bounce_origin, sampled.incoming);
     let indirect = trace_spectral_wavelength(
         scene,
         accel,
@@ -394,32 +431,7 @@ fn trace_spectral_wavelength(
         wavelength_nm,
     );
 
-    direct + reflectance * indirect
-}
-
-fn sample_cosine_weighted_hemisphere(normal: Vector3<f32>, seed: u64) -> Vector3<f32> {
-    let u1 = hash01(seed ^ 0x55aa).max(1e-6);
-    let u2 = hash01(seed ^ 0xaa55);
-
-    let r = u1.sqrt();
-    let theta = 2.0 * PI * u2;
-    let x = r * theta.cos();
-    let y = r * theta.sin();
-    let z = (1.0 - u1).sqrt();
-
-    let (tangent, bitangent) = orthonormal_basis(normal);
-    (tangent * x + bitangent * y + normal * z).normalize()
-}
-
-fn orthonormal_basis(normal: Vector3<f32>) -> (Vector3<f32>, Vector3<f32>) {
-    let helper = if normal.z.abs() < 0.999 {
-        Vector3::new(0.0, 0.0, 1.0)
-    } else {
-        Vector3::new(0.0, 1.0, 0.0)
-    };
-    let tangent = normal.cross(&helper).normalize();
-    let bitangent = normal.cross(&tangent).normalize();
-    (tangent, bitangent)
+    (emission + direct + sampled.value * indirect * cosine / sampled.pdf).max(0.0)
 }
 
 fn is_shadowed(

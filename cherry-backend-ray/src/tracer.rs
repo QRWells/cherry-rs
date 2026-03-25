@@ -1,9 +1,13 @@
-use cherry_core::{Color, FrameRequest, Ray, SceneSnapshot};
-use nalgebra::Vector3;
+use cherry_core::{
+    Bsdf, BsdfEvalQuery, BsdfSampleInput, BsdfSampleQuery, Color, FrameRequest, Ray, SceneSnapshot,
+    WAVELENGTH_BIN_COUNT, WAVELENGTH_BIN_STEP_NM, cie_xyz_from_wavelength, wavelength_for_bin,
+    xyz_to_linear_srgb,
+};
+use nalgebra::{Point3, Vector3};
 
 use crate::accel::Accel;
 
-const PREVIEW_AMBIENT: f32 = 0.2;
+const EPSILON: f32 = 1e-6;
 
 pub trait Tracer: Send + Sync {
     fn trace(
@@ -30,7 +34,10 @@ impl Tracer for NormalTracer {
         _seed: u64,
     ) -> Color {
         match accel.intersect(ray, scene) {
-            Some(hit) => hit.normal.abs().component_mul(&hit.material.albedo()),
+            Some(hit) => hit
+                .normal
+                .abs()
+                .component_mul(&hit.material.preview_base_color()),
             None => scene.background,
         }
     }
@@ -52,24 +59,13 @@ impl MonteCarloTracer {
         (value as f64 / u64::MAX as f64) as f32
     }
 
-    fn sample_hemisphere(normal: Vector3<f32>, seed: u64) -> Vector3<f32> {
-        let z = Self::hash01(seed ^ 0x1122).max(1e-4);
-        let phi = 2.0 * std::f32::consts::PI * Self::hash01(seed ^ 0x3344);
-        let r = (1.0 - z * z).sqrt();
-        let local = Vector3::new(r * phi.cos(), r * phi.sin(), z).normalize();
-        if local.dot(&normal) < 0.0 {
-            -local
-        } else {
-            local
+    fn sample_input(seed: u64, depth: u32) -> BsdfSampleInput {
+        BsdfSampleInput {
+            lobe: Self::hash01(seed ^ ((depth as u64 + 1) * 0x1a2b_3c4d)),
+            u1: Self::hash01(seed ^ ((depth as u64 + 1) * 0x5566_7788)),
+            u2: Self::hash01(seed ^ ((depth as u64 + 1) * 0x99aa_bbcc)),
         }
     }
-}
-
-fn preview_diffuse(normal: Vector3<f32>, albedo: Color) -> Color {
-    let key_light_dir = Vector3::new(-0.4, 0.8, 0.45).normalize();
-    let diffuse = normal.dot(&key_light_dir).max(0.0);
-    let shade = PREVIEW_AMBIENT + (1.0 - PREVIEW_AMBIENT) * diffuse;
-    albedo * shade
 }
 
 impl Tracer for MonteCarloTracer {
@@ -91,15 +87,36 @@ impl Tracer for MonteCarloTracer {
             None => return scene.background,
         };
 
-        let albedo = hit.material.albedo();
-        let direct_preview = preview_diffuse(hit.normal, albedo);
+        let normal = hit.normal.normalize();
+        let outgoing = (-ray.dir).normalize();
+        let origin = offset_origin(hit.point, normal, outgoing);
+
+        let bsdf = hit.material;
+        let emission = bsdf.emissive_rgb();
+        let direct =
+            estimate_direct_lighting(scene, accel, origin, normal, outgoing, bsdf.as_ref());
 
         if depth + 1 >= request.max_bounces.max(1) {
-            return direct_preview;
+            return clamp_color_non_negative(emission + direct);
         }
 
-        let bounce_dir = Self::sample_hemisphere(hit.normal, seed ^ depth as u64);
-        let bounce_ray = Ray::new(hit.point + hit.normal * 1e-3, bounce_dir);
+        let sample_query = BsdfSampleQuery { normal, outgoing };
+        let sample_input = Self::sample_input(seed, depth);
+        let Some(sampled) = bsdf.sample(&sample_query, sample_input) else {
+            return clamp_color_non_negative(emission + direct);
+        };
+
+        if sampled.pdf <= EPSILON {
+            return clamp_color_non_negative(emission + direct);
+        }
+
+        let cosine = normal.dot(&sampled.incoming).abs();
+        if cosine <= EPSILON {
+            return clamp_color_non_negative(emission + direct);
+        }
+
+        let bounce_origin = offset_origin(hit.point, normal, sampled.incoming);
+        let bounce_ray = Ray::new(bounce_origin, sampled.incoming);
         let indirect = self.trace(
             scene,
             accel,
@@ -109,6 +126,108 @@ impl Tracer for MonteCarloTracer {
             seed ^ 0x9e37_79b9,
         );
 
-        direct_preview + indirect.component_mul(&albedo) * 0.3
+        let throughput = sampled.value.component_mul(&indirect) * (cosine / sampled.pdf);
+        clamp_color_non_negative(emission + direct + throughput)
     }
+}
+
+fn estimate_direct_lighting(
+    scene: &SceneSnapshot,
+    accel: &dyn Accel,
+    origin: Point3<f32>,
+    normal: Vector3<f32>,
+    outgoing: Vector3<f32>,
+    bsdf: &dyn Bsdf,
+) -> Color {
+    let mut direct = Color::new(0.0, 0.0, 0.0);
+
+    for light in &scene.lights {
+        let Some((direction_to_light, distance, irradiance_rgb)) =
+            sample_light_rgb(light.as_ref(), origin)
+        else {
+            continue;
+        };
+
+        let cosine = normal.dot(&direction_to_light).max(0.0);
+        if cosine <= 0.0 {
+            continue;
+        }
+
+        if is_shadowed(accel, scene, origin, direction_to_light, distance) {
+            continue;
+        }
+
+        let eval = bsdf.eval(&BsdfEvalQuery {
+            normal,
+            outgoing,
+            incoming: direction_to_light,
+        });
+
+        direct += eval.component_mul(&irradiance_rgb) * cosine;
+    }
+
+    direct
+}
+
+fn sample_light_rgb(
+    light: &dyn cherry_core::Light,
+    point: Point3<f32>,
+) -> Option<(Vector3<f32>, f32, Color)> {
+    let spectral_light = light.as_spectral()?;
+
+    let geometry_sample = spectral_light.sample_irradiance_at(point, 550.0)?;
+    let mut xyz = Vector3::new(0.0, 0.0, 0.0);
+
+    for index in 0..WAVELENGTH_BIN_COUNT {
+        let wavelength = wavelength_for_bin(index);
+        let Some(sample) = spectral_light.sample_irradiance_at(point, wavelength) else {
+            continue;
+        };
+        xyz += cie_xyz_from_wavelength(wavelength) * sample.irradiance_at_nm;
+    }
+
+    let rgb = xyz_to_linear_srgb(xyz * WAVELENGTH_BIN_STEP_NM);
+    Some((
+        geometry_sample.direction_to_light,
+        geometry_sample.distance,
+        clamp_color_non_negative(rgb),
+    ))
+}
+
+fn is_shadowed(
+    accel: &dyn Accel,
+    scene: &SceneSnapshot,
+    origin: Point3<f32>,
+    direction_to_light: Vector3<f32>,
+    max_distance: f32,
+) -> bool {
+    let shadow_ray = Ray::new(origin, direction_to_light);
+    let Some(hit) = accel.intersect(&shadow_ray, scene) else {
+        return false;
+    };
+
+    if max_distance.is_finite() {
+        hit.distance < max_distance - 1e-3
+    } else {
+        true
+    }
+}
+
+fn offset_origin(point: Point3<f32>, normal: Vector3<f32>, direction: Vector3<f32>) -> Point3<f32> {
+    let sign = if normal.dot(&direction) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    point + normal * (sign * 1e-3)
+}
+
+fn clamp_color_non_negative(color: Color) -> Color {
+    color.map(|channel| {
+        if channel.is_finite() {
+            channel.max(0.0)
+        } else {
+            0.0
+        }
+    })
 }

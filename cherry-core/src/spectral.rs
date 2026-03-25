@@ -6,6 +6,7 @@ pub const WAVELENGTH_MIN_NM: f32 = 380.0;
 pub const WAVELENGTH_MAX_NM: f32 = 780.0;
 pub const WAVELENGTH_BIN_STEP_NM: f32 = 10.0;
 pub const WAVELENGTH_BIN_COUNT: usize = 41;
+const RGB_EMISSION_NORMALIZATION: f32 = 1.53;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Wavelength(f32);
@@ -146,14 +147,18 @@ fn gaussian(wavelength_nm: f32, center: f32, sigma: f32) -> f32 {
     (-0.5 * value * value).exp()
 }
 
-pub fn rgb_to_emission_at_nm(color: Color, wavelength_nm: f32) -> f32 {
+fn rgb_gaussian_mix(color: Color, wavelength_nm: f32) -> f32 {
     color.x.max(0.0) * gaussian(wavelength_nm, 610.0, 45.0)
         + color.y.max(0.0) * gaussian(wavelength_nm, 550.0, 35.0)
         + color.z.max(0.0) * gaussian(wavelength_nm, 460.0, 30.0)
 }
 
+pub fn rgb_to_emission_at_nm(color: Color, wavelength_nm: f32) -> f32 {
+    rgb_gaussian_mix(color, wavelength_nm) / RGB_EMISSION_NORMALIZATION
+}
+
 pub fn rgb_to_reflectance_at_nm(color: Color, wavelength_nm: f32) -> f32 {
-    rgb_to_emission_at_nm(color, wavelength_nm).clamp(0.0, 1.0)
+    rgb_gaussian_mix(color, wavelength_nm).clamp(0.0, 1.0)
 }
 
 pub fn rgb_to_emission_spectrum(color: Color) -> SampledSpectrum {
@@ -168,7 +173,8 @@ pub fn rgb_to_reflectance_spectrum(color: Color) -> SampledSpectrum {
 mod tests {
     use super::{
         SampledSpectrum, WAVELENGTH_BIN_COUNT, WAVELENGTH_MAX_NM, WAVELENGTH_MIN_NM, Wavelength,
-        apply_exposure_reinhard, cie_xyz_from_wavelength, xyz_to_linear_srgb,
+        apply_exposure_reinhard, cie_xyz_from_wavelength, rgb_to_emission_at_nm,
+        xyz_to_linear_srgb,
     };
     use crate::Color;
 
@@ -209,5 +215,17 @@ mod tests {
         assert!(mapped.x < 1.0);
         assert!(mapped.y < 1.0);
         assert!(mapped.z < 1.0);
+    }
+
+    #[test]
+    fn white_rgb_emission_is_normalized_in_visible_range() {
+        let white = Color::new(1.0, 1.0, 1.0);
+        for wavelength in (WAVELENGTH_MIN_NM as usize..=WAVELENGTH_MAX_NM as usize).step_by(5) {
+            let emission = rgb_to_emission_at_nm(white, wavelength as f32);
+            assert!(
+                emission <= 1.0 + 1e-4,
+                "expected normalized emission <= 1.0, got {emission} at {wavelength}nm"
+            );
+        }
     }
 }

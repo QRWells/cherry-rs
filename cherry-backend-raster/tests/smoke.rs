@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cherry_backend_raster::RasterBackend;
-use cherry_core::{Camera, Color, Cuboid, FrameRequest, Lambertian, SceneSnapshot, Sphere};
+use cherry_core::{Camera, Color, Cuboid, FrameRequest, GltfMrBsdf, SceneSnapshot, Sphere};
 use cherry_render::{NoopFrameSink, RenderBackend};
 use nalgebra::{Point3, Vector3};
 
@@ -31,7 +31,7 @@ fn x_face_camera() -> Camera {
 
 #[test]
 fn raster_backend_renders_simple_scene() {
-    let material = Arc::new(Lambertian::new(Color::new(0.7, 0.2, 0.2)));
+    let material = Arc::new(GltfMrBsdf::opaque(Color::new(0.7, 0.2, 0.2), 0.0, 0.5));
     let sphere = Arc::new(Sphere::new(Point3::new(0.0, 0.0, 0.0), 0.9, material));
 
     let mut scene = SceneSnapshot::new(test_camera()).with_background(Color::new(0.02, 0.02, 0.02));
@@ -81,7 +81,7 @@ fn raster_backend_preserves_material_channel_on_x_face() {
     scene.add_primitive(Arc::new(Cuboid::new(
         Point3::new(-1.0, -1.0, -1.0),
         Point3::new(1.0, 1.0, 1.0),
-        Arc::new(Lambertian::new(Color::new(0.0, 1.0, 0.0))),
+        Arc::new(GltfMrBsdf::opaque(Color::new(0.0, 1.0, 0.0), 0.0, 0.45)),
     )));
 
     let backend = RasterBackend::new();

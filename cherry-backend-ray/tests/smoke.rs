@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use cherry_backend_ray::{RayAccel, RayBackend, SpectralRayBackend, TraceMethod};
 use cherry_core::{
-    Camera, Color, Cuboid, DirectionalSpectralLight, FrameRequest, Lambertian, PointSpectralLight,
-    SceneSnapshot, SpectralLambertian, Sphere, rgb_to_emission_spectrum,
+    Camera, Color, Cuboid, DirectionalSpectralLight, FrameRequest, GltfMrBsdf, PointSpectralLight,
+    SceneSnapshot, Sphere, rgb_to_emission_spectrum,
 };
 use cherry_render::{NoopFrameSink, RenderBackend};
 use nalgebra::{Point3, Vector2, Vector3};
@@ -33,8 +33,8 @@ fn x_face_camera() -> Camera {
 }
 
 fn test_scene() -> SceneSnapshot {
-    let red = Arc::new(Lambertian::new(Color::new(0.8, 0.2, 0.2)));
-    let blue = Arc::new(Lambertian::new(Color::new(0.2, 0.3, 0.8)));
+    let red = Arc::new(GltfMrBsdf::opaque(Color::new(0.8, 0.2, 0.2), 0.0, 0.55));
+    let blue = Arc::new(GltfMrBsdf::opaque(Color::new(0.2, 0.3, 0.8), 0.0, 0.4));
 
     let mut scene = SceneSnapshot::new(test_camera()).with_background(Color::new(0.03, 0.04, 0.05));
     scene.add_primitive(Arc::new(Sphere::new(Point3::new(-0.6, 0.0, 0.0), 0.8, red)));
@@ -47,8 +47,15 @@ fn test_scene() -> SceneSnapshot {
 }
 
 fn spectral_test_scene() -> SceneSnapshot {
-    let spectral_material = Arc::new(SpectralLambertian::from_rgb(Color::new(0.85, 0.4, 0.2)));
-    let floor_material = Arc::new(SpectralLambertian::from_rgb(Color::new(0.5, 0.6, 0.8)));
+    let spectral_material = Arc::new(GltfMrBsdf::new(
+        Color::new(0.85, 0.4, 0.2),
+        0.1,
+        0.3,
+        Color::new(0.0, 0.0, 0.0),
+        0.4,
+        1.45,
+    ));
+    let floor_material = Arc::new(GltfMrBsdf::opaque(Color::new(0.5, 0.6, 0.8), 0.0, 0.7));
 
     let mut scene = SceneSnapshot::new(test_camera())
         .with_spectral_background(rgb_to_emission_spectrum(Color::new(0.02, 0.03, 0.04)));
@@ -81,7 +88,11 @@ fn green_x_face_scene() -> SceneSnapshot {
     scene.add_primitive(Arc::new(Cuboid::new(
         Point3::new(-1.0, -1.0, -1.0),
         Point3::new(1.0, 1.0, 1.0),
-        Arc::new(Lambertian::new(Color::new(0.0, 1.0, 0.0))),
+        Arc::new(GltfMrBsdf::opaque(Color::new(0.0, 1.0, 0.0), 0.0, 0.5)),
+    )));
+    scene.add_light(Arc::new(PointSpectralLight::from_rgb(
+        Point3::new(-3.0, 1.2, 0.4),
+        Color::new(1.0, 1.0, 1.0),
     )));
     scene
 }
@@ -92,7 +103,7 @@ fn spectral_green_x_face_scene() -> SceneSnapshot {
     scene.add_primitive(Arc::new(Cuboid::new(
         Point3::new(-1.0, -1.0, -1.0),
         Point3::new(1.0, 1.0, 1.0),
-        Arc::new(SpectralLambertian::from_rgb(Color::new(0.0, 1.0, 0.0))),
+        Arc::new(GltfMrBsdf::opaque(Color::new(0.0, 1.0, 0.0), 0.0, 0.5)),
     )));
     scene.add_light(Arc::new(PointSpectralLight::from_rgb(
         Point3::new(-3.0, 1.2, 0.4),

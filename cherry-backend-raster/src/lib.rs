@@ -20,7 +20,7 @@ impl RasterBackend {
     fn shade_pixel(scene: &SceneSnapshot, uv: Vector2<f32>) -> Color {
         let ray = scene.camera.generate_ray(uv);
         match scene.intersect(&ray) {
-            Some(hit) => preview_diffuse(hit.normal, hit.material.albedo()),
+            Some(hit) => preview_diffuse(hit.normal, hit.material.preview_base_color()),
             None => scene.background,
         }
     }

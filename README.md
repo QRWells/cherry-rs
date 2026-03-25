@@ -1,14 +1,14 @@
 # Cherry.rs
 
-Dual-backend renderer workspace with pluggable runtime-selected tracing methods, including a
-spectral ray-tracing path.
+Dual-backend renderer workspace with pluggable runtime-selected tracing methods, including
+modular BSDF-based PBR shading and a spectral ray-tracing path.
 
 ## Workspace Crates
 
-- `cherry-core`: shared scene/camera/material/primitive types, spectral contracts/utilities, and `SceneProvider`
+- `cherry-core`: shared scene/camera/BSDF/primitive types, spectral contracts/utilities, and `SceneProvider` (includes glTF-style metallic-roughness + transmission `GltfMrBsdf`)
 - `cherry-render`: typed backend traits, runtime-erased registry, frame sink events, render orchestration
 - `cherry-backend-raster`: CPU software raster backend
-- `cherry-backend-ray`: CPU ray backends (`ray.normal`, `ray.montecarlo`, `ray.spectral`) with pluggable tracer and `Accel` trait (`BruteForceAccel`)
+- `cherry-backend-ray`: CPU ray backends (`ray.normal`, `ray.montecarlo`, `ray.spectral`) with BSDF-driven path tracing and pluggable `Accel` trait (`BruteForceAccel`)
 - `cherry-app`: thin CLI runner over the library APIs
 - `cherry-gui`: native desktop GUI preview app (`eframe` + `egui`) for realtime progressive frame display
 
