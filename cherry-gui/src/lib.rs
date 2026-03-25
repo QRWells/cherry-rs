@@ -8,17 +8,21 @@ use cherry_app::{
     DEFAULT_SPECTRAL_EXPOSURE, RuntimeRenderConfig, build_animated_scene_provider,
     build_registry_with_config, initialize_gpu,
 };
-use cherry_core::{Color, FrameRequest};
+use cherry_core::{Color, FrameRequest, PathTracingConfig};
 use cherry_render::{BackendId, FrameEvent, FrameSink, RenderStats, color_to_rgb8, render_frame};
 use eframe::egui;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderParams {
     pub backend_id: String,
     pub width: u32,
     pub height: u32,
     pub samples_per_pixel: u32,
     pub max_bounces: u32,
+    pub rr_start_depth: u32,
+    pub rr_min_survival: f32,
+    pub indirect_clamp: f32,
+    pub direct_lighting: bool,
     pub cpu_threads: Option<usize>,
     pub init_gpu: bool,
 }
@@ -31,6 +35,10 @@ impl Default for RenderParams {
             height: 180,
             samples_per_pixel: 1,
             max_bounces: 3,
+            rr_start_depth: 3,
+            rr_min_survival: 0.05,
+            indirect_clamp: 10.0,
+            direct_lighting: true,
             cpu_threads: None,
             init_gpu: false,
         }
@@ -155,7 +163,7 @@ impl FrameSink for ChannelFrameSink {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuiState {
     pub params: RenderParams,
     pub status: RenderStatus,
@@ -260,6 +268,12 @@ fn run_render_job_with_initializer(
         time: 0.0,
         samples_per_pixel: params.samples_per_pixel,
         max_bounces: params.max_bounces,
+        path_tracing: PathTracingConfig {
+            rr_start_depth: params.rr_start_depth,
+            rr_min_survival: params.rr_min_survival,
+            indirect_clamp: params.indirect_clamp,
+            direct_lighting: params.direct_lighting,
+        },
     };
 
     let mut sink = ChannelFrameSink::new(tx.clone());
@@ -274,6 +288,10 @@ pub fn run_render_job(params: RenderParams, tx: Sender<WorkerMessage>) {
             .map(|_| ())
             .map_err(|error| error.to_string())
     });
+}
+
+fn supports_path_tracing_controls(backend_id: &str) -> bool {
+    matches!(backend_id, "ray.montecarlo" | "ray.spectral")
 }
 
 struct CherryGuiApp {
@@ -467,6 +485,33 @@ impl CherryGuiApp {
                             egui::DragValue::new(&mut self.state.params.max_bounces).range(1..=64),
                         );
                     });
+                    if supports_path_tracing_controls(&self.state.params.backend_id) {
+                        ui.separator();
+                        ui.label("Path Tracing");
+                        ui.horizontal(|ui| {
+                            ui.label("RR Start Depth");
+                            ui.add(
+                                egui::DragValue::new(&mut self.state.params.rr_start_depth)
+                                    .range(0..=64),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("RR Min Survival");
+                            ui.add(
+                                egui::DragValue::new(&mut self.state.params.rr_min_survival)
+                                    .range(0.0..=1.0)
+                                    .speed(0.01),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Indirect Clamp");
+                            ui.add(
+                                egui::DragValue::new(&mut self.state.params.indirect_clamp)
+                                    .speed(0.1),
+                            );
+                        });
+                        ui.checkbox(&mut self.state.params.direct_lighting, "Direct Lighting");
+                    }
                     ui.horizontal(|ui| {
                         let mut auto_threads = self.state.params.cpu_threads.is_none();
                         if ui.checkbox(&mut auto_threads, "Auto CPU Threads").changed() {
@@ -613,6 +658,7 @@ mod tests {
                 time: 0.0,
                 samples_per_pixel: 1,
                 max_bounces: 1,
+                path_tracing: Default::default(),
             },
         });
 
@@ -653,6 +699,7 @@ mod tests {
                 time: 0.0,
                 samples_per_pixel: 1,
                 max_bounces: 1,
+                path_tracing: Default::default(),
             },
         });
 
@@ -675,6 +722,10 @@ mod tests {
             height: 16,
             samples_per_pixel: 1,
             max_bounces: 1,
+            rr_start_depth: 3,
+            rr_min_survival: 0.05,
+            indirect_clamp: 10.0,
+            direct_lighting: true,
             cpu_threads: None,
             init_gpu: false,
         };
@@ -710,6 +761,10 @@ mod tests {
     #[test]
     fn default_params_keep_gpu_init_disabled_and_cpu_threads_auto() {
         let params = RenderParams::default();
+        assert_eq!(params.rr_start_depth, 3);
+        assert!((params.rr_min_survival - 0.05).abs() < f32::EPSILON);
+        assert!((params.indirect_clamp - 10.0).abs() < f32::EPSILON);
+        assert!(params.direct_lighting);
         assert_eq!(params.cpu_threads, None);
         assert!(!params.init_gpu);
     }
@@ -722,6 +777,10 @@ mod tests {
             height: 8,
             samples_per_pixel: 1,
             max_bounces: 1,
+            rr_start_depth: 3,
+            rr_min_survival: 0.05,
+            indirect_clamp: 10.0,
+            direct_lighting: true,
             cpu_threads: None,
             init_gpu: true,
         };
@@ -738,5 +797,50 @@ mod tests {
             Ok(other) => panic!("expected error event, got {:?}", other),
             Err(err) => panic!("expected event, got channel error: {err}"),
         }
+    }
+
+    #[test]
+    fn path_tracing_control_visibility_is_backend_gated() {
+        assert!(super::supports_path_tracing_controls("ray.montecarlo"));
+        assert!(super::supports_path_tracing_controls("ray.spectral"));
+        assert!(!super::supports_path_tracing_controls("ray.normal"));
+        assert!(!super::supports_path_tracing_controls("raster.simple"));
+    }
+
+    #[test]
+    fn worker_job_propagates_path_tracing_settings_to_request() {
+        let params = RenderParams {
+            backend_id: "raster.simple".to_string(),
+            width: 8,
+            height: 8,
+            samples_per_pixel: 1,
+            max_bounces: 2,
+            rr_start_depth: 7,
+            rr_min_survival: 0.22,
+            indirect_clamp: 2.75,
+            direct_lighting: false,
+            cpu_threads: None,
+            init_gpu: false,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        super::run_render_job(params, tx);
+
+        let begin_request = loop {
+            match rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("expected event")
+            {
+                WorkerMessage::Begin { request, .. } => break request,
+                WorkerMessage::Scanline { .. } => {}
+                WorkerMessage::End { .. } => panic!("expected begin event before end"),
+                WorkerMessage::Error(message) => panic!("unexpected render error: {message}"),
+            }
+        };
+
+        assert_eq!(begin_request.path_tracing.rr_start_depth, 7);
+        assert!((begin_request.path_tracing.rr_min_survival - 0.22).abs() < f32::EPSILON);
+        assert!((begin_request.path_tracing.indirect_clamp - 2.75).abs() < f32::EPSILON);
+        assert!(!begin_request.path_tracing.direct_lighting);
     }
 }

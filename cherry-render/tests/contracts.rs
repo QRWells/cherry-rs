@@ -188,6 +188,7 @@ fn render_frame_produces_image_of_expected_size() {
         time: 0.0,
         samples_per_pixel: 1,
         max_bounces: 1,
+        path_tracing: Default::default(),
     };
 
     let mut sink = NoopFrameSink;
@@ -218,6 +219,7 @@ fn frame_sink_receives_events_in_order() {
         time: 0.0,
         samples_per_pixel: 1,
         max_bounces: 1,
+        path_tracing: Default::default(),
     };
 
     let mut sink = CollectingSink::new();
@@ -258,6 +260,7 @@ fn render_sequence_calls_snapshot_with_expected_times() {
             time: 0.0,
             samples_per_pixel: 1,
             max_bounces: 1,
+            path_tracing: Default::default(),
         },
     };
 
@@ -312,6 +315,7 @@ fn spectral_backend_scanline_emits_optional_spectral_payload() {
         time: 0.0,
         samples_per_pixel: 1,
         max_bounces: 1,
+        path_tracing: Default::default(),
     };
 
     let mut sink = SpectralDetectSink::new();
@@ -424,6 +428,7 @@ fn scanline_event_is_emitted_before_backend_completion() {
         time: 0.0,
         samples_per_pixel: 1,
         max_bounces: 1,
+        path_tracing: Default::default(),
     };
 
     let (event_tx, event_rx) = mpsc::channel();

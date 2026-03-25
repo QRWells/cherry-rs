@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use cherry_backend_ray::{RayAccel, RayBackend, SpectralRayBackend, TraceMethod};
 use cherry_core::{
-    Camera, Color, Cuboid, DirectionalSpectralLight, FrameRequest, GltfMrBsdf, PointSpectralLight,
-    SceneSnapshot, Sphere, rgb_to_emission_spectrum,
+    Camera, Color, Cuboid, DirectionalSpectralLight, FrameRequest, GltfMrBsdf, PathTracingConfig,
+    PointSpectralLight, SceneSnapshot, Sphere, rgb_to_emission_spectrum,
 };
 use cherry_render::{NoopFrameSink, RenderBackend};
 use nalgebra::{Point3, Vector2, Vector3};
@@ -112,6 +112,21 @@ fn spectral_green_x_face_scene() -> SceneSnapshot {
     scene
 }
 
+fn high_energy_indirect_scene() -> SceneSnapshot {
+    let white = Arc::new(GltfMrBsdf::opaque(Color::new(0.9, 0.9, 0.9), 0.0, 0.25));
+    let mut scene = SceneSnapshot::new(test_camera()).with_background(Color::new(6.0, 6.0, 6.0));
+    scene.add_primitive(Arc::new(Sphere::new(
+        Point3::new(0.0, 0.0, 0.0),
+        0.9,
+        white,
+    )));
+    scene
+}
+
+fn luminance(color: Color) -> f32 {
+    0.2126 * color.x + 0.7152 * color.y + 0.0722 * color.z
+}
+
 #[test]
 fn brute_force_accel_hits_scene() {
     let scene = test_scene();
@@ -131,6 +146,7 @@ fn ray_backend_normal_and_monte_carlo_render() {
         time: 0.0,
         samples_per_pixel: 2,
         max_bounces: 3,
+        path_tracing: Default::default(),
     };
 
     for method in [TraceMethod::Normal, TraceMethod::MonteCarlo] {
@@ -154,6 +170,7 @@ fn spectral_backend_renders_and_is_deterministic() {
         time: 0.0,
         samples_per_pixel: 3,
         max_bounces: 3,
+        path_tracing: Default::default(),
     };
 
     let backend = SpectralRayBackend::with_exposure(1.0);
@@ -181,6 +198,7 @@ fn monte_carlo_backend_preserves_material_channel_on_x_face() {
         time: 0.0,
         samples_per_pixel: 1,
         max_bounces: 1,
+        path_tracing: Default::default(),
     };
 
     let backend = RayBackend::with_method(TraceMethod::MonteCarlo);
@@ -205,6 +223,7 @@ fn spectral_backend_preserves_material_channel_on_x_face() {
         time: 0.0,
         samples_per_pixel: 128,
         max_bounces: 1,
+        path_tracing: Default::default(),
     };
 
     let backend = SpectralRayBackend::with_exposure(1.0);
@@ -229,6 +248,12 @@ fn ray_backend_is_deterministic_across_thread_counts() {
         time: 0.0,
         samples_per_pixel: 3,
         max_bounces: 3,
+        path_tracing: PathTracingConfig {
+            rr_start_depth: 1,
+            rr_min_survival: 0.2,
+            indirect_clamp: 1.5,
+            direct_lighting: true,
+        },
     };
 
     for method in [TraceMethod::Normal, TraceMethod::MonteCarlo] {
@@ -254,6 +279,12 @@ fn spectral_backend_is_deterministic_across_thread_counts() {
         time: 0.0,
         samples_per_pixel: 4,
         max_bounces: 3,
+        path_tracing: PathTracingConfig {
+            rr_start_depth: 1,
+            rr_min_survival: 0.2,
+            indirect_clamp: 1.5,
+            direct_lighting: true,
+        },
     };
 
     let backend_single = SpectralRayBackend::with_exposure_and_threads(0.6, Some(1));
@@ -265,4 +296,111 @@ fn spectral_backend_is_deterministic_across_thread_counts() {
     let multi = backend_multi.render_frame(&scene, &request, &mut sink);
 
     assert_eq!(single.image, multi.image);
+}
+
+#[test]
+fn monte_carlo_backend_honors_direct_lighting_toggle() {
+    let scene = green_x_face_scene();
+    let base_request = FrameRequest {
+        width: 32,
+        height: 32,
+        frame_index: 0,
+        time: 0.0,
+        samples_per_pixel: 4,
+        max_bounces: 3,
+        path_tracing: PathTracingConfig {
+            direct_lighting: true,
+            ..PathTracingConfig::default()
+        },
+    };
+    let no_direct_request = FrameRequest {
+        path_tracing: PathTracingConfig {
+            direct_lighting: false,
+            ..base_request.path_tracing.clone()
+        },
+        ..base_request.clone()
+    };
+
+    let backend = RayBackend::with_method(TraceMethod::MonteCarlo);
+    let with_direct = backend.render_frame_typed(&scene, &base_request);
+    let without_direct = backend.render_frame_typed(&scene, &no_direct_request);
+
+    let on = luminance(with_direct.scanlines[16].pixels[16]);
+    let off = luminance(without_direct.scanlines[16].pixels[16]);
+    assert!(
+        on > off + 0.01,
+        "expected direct-lighting toggle to affect luminance, on={on}, off={off}"
+    );
+}
+
+#[test]
+fn monte_carlo_backend_honors_indirect_clamp() {
+    let scene = high_energy_indirect_scene();
+    let base = FrameRequest {
+        width: 24,
+        height: 24,
+        frame_index: 2,
+        time: 0.0,
+        samples_per_pixel: 1,
+        max_bounces: 4,
+        path_tracing: PathTracingConfig {
+            rr_start_depth: 8,
+            rr_min_survival: 1.0,
+            indirect_clamp: 0.0,
+            direct_lighting: false,
+        },
+    };
+    let clamped = FrameRequest {
+        path_tracing: PathTracingConfig {
+            indirect_clamp: 0.01,
+            ..base.path_tracing.clone()
+        },
+        ..base.clone()
+    };
+
+    let backend = RayBackend::with_method(TraceMethod::MonteCarlo);
+    let unclamped_result = backend.render_frame_typed(&scene, &base);
+    let clamped_result = backend.render_frame_typed(&scene, &clamped);
+    let unclamped_luma = luminance(unclamped_result.scanlines[12].pixels[12]);
+    let clamped_luma = luminance(clamped_result.scanlines[12].pixels[12]);
+
+    assert!(
+        unclamped_luma > clamped_luma,
+        "expected clamp to reduce indirect energy, unclamped={unclamped_luma}, clamped={clamped_luma}"
+    );
+}
+
+#[test]
+fn spectral_backend_honors_direct_lighting_toggle() {
+    let scene = spectral_green_x_face_scene();
+    let base_request = FrameRequest {
+        width: 32,
+        height: 32,
+        frame_index: 0,
+        time: 0.0,
+        samples_per_pixel: 32,
+        max_bounces: 3,
+        path_tracing: PathTracingConfig {
+            direct_lighting: true,
+            ..PathTracingConfig::default()
+        },
+    };
+    let no_direct_request = FrameRequest {
+        path_tracing: PathTracingConfig {
+            direct_lighting: false,
+            ..base_request.path_tracing.clone()
+        },
+        ..base_request.clone()
+    };
+
+    let backend = SpectralRayBackend::with_exposure(1.0);
+    let with_direct = backend.render_frame_typed(&scene, &base_request);
+    let without_direct = backend.render_frame_typed(&scene, &no_direct_request);
+
+    let on = luminance(with_direct.scanlines[16].pixels[16].color);
+    let off = luminance(without_direct.scanlines[16].pixels[16].color);
+    assert!(
+        on > off + 0.01,
+        "expected spectral direct-lighting toggle to affect luminance, on={on}, off={off}"
+    );
 }

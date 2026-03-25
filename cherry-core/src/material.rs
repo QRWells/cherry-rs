@@ -891,8 +891,8 @@ mod tests {
         let grazing = fresnel_dielectric(0.05, 1.5);
 
         assert!(grazing > normal_incidence);
-        assert!(normal_incidence >= 0.0 && normal_incidence <= 1.0);
-        assert!(grazing >= 0.0 && grazing <= 1.0);
+        assert!((0.0..=1.0).contains(&normal_incidence));
+        assert!((0.0..=1.0).contains(&grazing));
     }
 
     #[test]

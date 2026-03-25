@@ -45,6 +45,7 @@ fn raster_backend_renders_simple_scene() {
         time: 0.0,
         samples_per_pixel: 1,
         max_bounces: 1,
+        path_tracing: Default::default(),
     };
 
     let mut sink = NoopFrameSink;
@@ -67,6 +68,7 @@ fn raster_backend_handles_empty_scene() {
         time: 0.0,
         samples_per_pixel: 1,
         max_bounces: 1,
+        path_tracing: Default::default(),
     };
 
     let mut sink = NoopFrameSink;
@@ -92,6 +94,7 @@ fn raster_backend_preserves_material_channel_on_x_face() {
         time: 0.0,
         samples_per_pixel: 1,
         max_bounces: 1,
+        path_tracing: Default::default(),
     };
 
     let mut sink = NoopFrameSink;
@@ -120,6 +123,7 @@ fn raster_backend_is_deterministic_across_thread_counts() {
         time: 0.0,
         samples_per_pixel: 1,
         max_bounces: 1,
+        path_tracing: Default::default(),
     };
 
     let mut sink = NoopFrameSink;

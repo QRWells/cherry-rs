@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser, Subcommand, error::ErrorKind};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand, error::ErrorKind};
 
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -35,6 +35,22 @@ pub struct Cli {
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub max_bounces: u32,
+
+    #[arg(long, default_value_t = 3)]
+    pub rr_start_depth: u32,
+
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        value_parser = parse_rr_min_survival
+    )]
+    pub rr_min_survival: f32,
+
+    #[arg(long, default_value_t = 10.0, value_parser = clap::value_parser!(f32))]
+    pub indirect_clamp: f32,
+
+    #[arg(long, default_value_t = true, action = ArgAction::Set)]
+    pub direct_lighting: bool,
 
     #[arg(
         long,
@@ -105,6 +121,16 @@ fn parse_cpu_threads(raw: &str) -> Result<usize, String> {
     Ok(parsed)
 }
 
+fn parse_rr_min_survival(raw: &str) -> Result<f32, String> {
+    let parsed = raw
+        .parse::<f32>()
+        .map_err(|_| format!("invalid rr_min_survival '{raw}'"))?;
+    if !(0.0..=1.0).contains(&parsed) {
+        return Err("rr_min_survival must be between 0.0 and 1.0".to_string());
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -120,6 +146,10 @@ mod tests {
         assert_eq!(cli.frames, 1);
         assert_eq!(cli.samples_per_pixel, 1);
         assert_eq!(cli.max_bounces, 3);
+        assert_eq!(cli.rr_start_depth, 3);
+        assert!((cli.rr_min_survival - 0.05).abs() < f32::EPSILON);
+        assert!((cli.indirect_clamp - 10.0).abs() < f32::EPSILON);
+        assert!(cli.direct_lighting);
         assert_eq!(cli.exposure, 0.2);
         assert!(cli.cpu_threads.is_none());
         assert!(!cli.init_gpu);
@@ -139,6 +169,21 @@ mod tests {
     fn exposure_parses() {
         let cli = Cli::parse_from(["cherry-app", "--exposure=1.75"]);
         assert!((cli.exposure - 1.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn path_tracing_flags_parse() {
+        let cli = Cli::parse_from([
+            "cherry-app",
+            "--rr-start-depth=6",
+            "--rr-min-survival=0.2",
+            "--indirect-clamp=2.5",
+            "--direct-lighting=false",
+        ]);
+        assert_eq!(cli.rr_start_depth, 6);
+        assert!((cli.rr_min_survival - 0.2).abs() < f32::EPSILON);
+        assert!((cli.indirect_clamp - 2.5).abs() < f32::EPSILON);
+        assert!(!cli.direct_lighting);
     }
 
     #[test]
@@ -163,6 +208,12 @@ mod tests {
     #[test]
     fn zero_values_are_rejected() {
         let err = Cli::try_parse_from(["cherry-app", "--height=0"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn rr_min_survival_out_of_range_is_rejected() {
+        let err = Cli::try_parse_from(["cherry-app", "--rr-min-survival=1.2"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 

@@ -5,7 +5,7 @@ use cherry_app::{
     RuntimeRenderConfig, build_animated_scene_provider, build_registry_with_config, initialize_gpu,
     output_filename,
 };
-use cherry_core::FrameRequest;
+use cherry_core::{FrameRequest, PathTracingConfig};
 use cherry_render::{BackendId, SequenceSpec, render_frame, render_sequence};
 use clap::Parser;
 use cli::{Cli, validate_backend};
@@ -52,6 +52,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time: 0.0,
         samples_per_pixel: cli.samples_per_pixel,
         max_bounces: cli.max_bounces,
+        path_tracing: PathTracingConfig {
+            rr_start_depth: cli.rr_start_depth,
+            rr_min_survival: cli.rr_min_survival,
+            indirect_clamp: cli.indirect_clamp,
+            direct_lighting: cli.direct_lighting,
+        },
     };
 
     if cli.frames <= 1 {

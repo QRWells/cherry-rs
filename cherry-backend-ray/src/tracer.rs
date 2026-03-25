@@ -66,6 +66,35 @@ impl MonteCarloTracer {
             u2: Self::hash01(seed ^ ((depth as u64 + 1) * 0x99aa_bbcc)),
         }
     }
+
+    fn russian_roulette_scale(
+        request: &FrameRequest,
+        depth: u32,
+        seed: u64,
+        continuation: f32,
+    ) -> Option<f32> {
+        let next_depth = depth + 1;
+        if next_depth < request.path_tracing.rr_start_depth {
+            return Some(1.0);
+        }
+
+        let min_survival = request.path_tracing.rr_min_survival.clamp(0.0, 1.0);
+        let survival = continuation.clamp(0.0, 1.0).max(min_survival);
+        if survival <= EPSILON {
+            return None;
+        }
+
+        if survival >= 1.0 {
+            return Some(1.0);
+        }
+
+        let rr_sample = Self::hash01(seed ^ ((next_depth as u64 + 1) * 0xd1b5_4a32));
+        if rr_sample > survival {
+            None
+        } else {
+            Some(1.0 / survival)
+        }
+    }
 }
 
 impl Tracer for MonteCarloTracer {
@@ -93,8 +122,11 @@ impl Tracer for MonteCarloTracer {
 
         let bsdf = hit.material;
         let emission = bsdf.emissive_rgb();
-        let direct =
-            estimate_direct_lighting(scene, accel, origin, normal, outgoing, bsdf.as_ref());
+        let direct = if request.path_tracing.direct_lighting {
+            estimate_direct_lighting(scene, accel, origin, normal, outgoing, bsdf.as_ref())
+        } else {
+            Color::new(0.0, 0.0, 0.0)
+        };
 
         if depth + 1 >= request.max_bounces.max(1) {
             return clamp_color_non_negative(emission + direct);
@@ -117,6 +149,18 @@ impl Tracer for MonteCarloTracer {
 
         let bounce_origin = offset_origin(hit.point, normal, sampled.incoming);
         let bounce_ray = Ray::new(bounce_origin, sampled.incoming);
+
+        let bounce_factor = sampled.value * (cosine / sampled.pdf);
+        let continuation = bounce_factor
+            .x
+            .max(bounce_factor.y)
+            .max(bounce_factor.z)
+            .max(0.0);
+        let Some(rr_scale) = Self::russian_roulette_scale(request, depth, seed, continuation)
+        else {
+            return clamp_color_non_negative(emission + direct);
+        };
+
         let indirect = self.trace(
             scene,
             accel,
@@ -126,7 +170,11 @@ impl Tracer for MonteCarloTracer {
             seed ^ 0x9e37_79b9,
         );
 
-        let throughput = sampled.value.component_mul(&indirect) * (cosine / sampled.pdf);
+        let mut throughput = bounce_factor.component_mul(&indirect) * rr_scale;
+        if request.path_tracing.indirect_clamp_enabled() {
+            throughput = clamp_color_max(throughput, request.path_tracing.indirect_clamp);
+        }
+
         clamp_color_non_negative(emission + direct + throughput)
     }
 }
@@ -226,6 +274,16 @@ fn clamp_color_non_negative(color: Color) -> Color {
     color.map(|channel| {
         if channel.is_finite() {
             channel.max(0.0)
+        } else {
+            0.0
+        }
+    })
+}
+
+fn clamp_color_max(color: Color, max_value: f32) -> Color {
+    color.map(|channel| {
+        if channel.is_finite() {
+            channel.clamp(0.0, max_value)
         } else {
             0.0
         }

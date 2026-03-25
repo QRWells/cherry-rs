@@ -12,7 +12,7 @@ pub mod spectral;
 
 pub use camera::Camera;
 pub use color::Color;
-pub use frame::FrameRequest;
+pub use frame::{FrameRequest, PathTracingConfig};
 pub use intersection::Hit;
 pub use light::{DirectionalSpectralLight, Light, PointSpectralLight, SpectralLight};
 pub use material::{

@@ -236,7 +236,7 @@ impl RayBackend {
         Self {
             metadata: BackendMetadata {
                 id: BackendId::new(RAY_MONTE_CARLO_BACKEND_ID),
-                display_name: "CPU Ray Backend (Monte Carlo)".to_string(),
+                display_name: "CPU Ray Backend (Path Tracing)".to_string(),
                 capabilities: BackendCapabilities {
                     progressive_updates: true,
                     gpu_ready_interface: true,
@@ -424,35 +424,38 @@ fn trace_spectral_wavelength(
     let emission = hit.material.emissive_at_nm(wavelength_nm);
 
     let mut direct = 0.0;
-    for light in &scene.lights {
-        let Some(spectral_light) = light.as_spectral() else {
-            continue;
-        };
+    if request.path_tracing.direct_lighting {
+        for light in &scene.lights {
+            let Some(spectral_light) = light.as_spectral() else {
+                continue;
+            };
 
-        let Some(sample) = spectral_light.sample_irradiance_at(hit_origin, wavelength_nm) else {
-            continue;
-        };
+            let Some(sample) = spectral_light.sample_irradiance_at(hit_origin, wavelength_nm)
+            else {
+                continue;
+            };
 
-        let incoming = sample.direction_to_light.normalize();
-        let cosine = normal.dot(&incoming).max(0.0);
-        if cosine <= 0.0 {
-            continue;
+            let incoming = sample.direction_to_light.normalize();
+            let cosine = normal.dot(&incoming).max(0.0);
+            if cosine <= 0.0 {
+                continue;
+            }
+
+            let shadowed = is_shadowed(accel, scene, hit_origin, incoming, sample.distance);
+            if shadowed {
+                continue;
+            }
+
+            let eval = hit.material.eval_spectral(
+                &BsdfEvalQuery {
+                    normal,
+                    outgoing,
+                    incoming,
+                },
+                wavelength_nm,
+            );
+            direct += sample.irradiance_at_nm * eval * cosine;
         }
-
-        let shadowed = is_shadowed(accel, scene, hit_origin, incoming, sample.distance);
-        if shadowed {
-            continue;
-        }
-
-        let eval = hit.material.eval_spectral(
-            &BsdfEvalQuery {
-                normal,
-                outgoing,
-                incoming,
-            },
-            wavelength_nm,
-        );
-        direct += sample.irradiance_at_nm * eval * cosine;
     }
 
     if depth + 1 >= request.max_bounces.max(1) {
@@ -479,6 +482,12 @@ fn trace_spectral_wavelength(
 
     let bounce_origin = offset_origin(hit.point, normal, sampled.incoming);
     let bounce_ray = Ray::new(bounce_origin, sampled.incoming);
+    let bounce_factor = sampled.value * cosine / sampled.pdf;
+    let Some(rr_scale) = spectral_russian_roulette_scale(request, depth, seed, bounce_factor)
+    else {
+        return (emission + direct).max(0.0);
+    };
+
     let indirect = trace_spectral_wavelength(
         scene,
         accel,
@@ -489,7 +498,13 @@ fn trace_spectral_wavelength(
         wavelength_nm,
     );
 
-    (emission + direct + sampled.value * indirect * cosine / sampled.pdf).max(0.0)
+    let mut indirect_contribution = bounce_factor * indirect * rr_scale;
+    if request.path_tracing.indirect_clamp_enabled() {
+        indirect_contribution =
+            indirect_contribution.clamp(0.0, request.path_tracing.indirect_clamp);
+    }
+
+    (emission + direct + indirect_contribution).max(0.0)
 }
 
 fn is_shadowed(
@@ -508,5 +523,34 @@ fn is_shadowed(
         hit.distance < max_distance - 1e-3
     } else {
         true
+    }
+}
+
+fn spectral_russian_roulette_scale(
+    request: &FrameRequest,
+    depth: u32,
+    seed: u64,
+    continuation: f32,
+) -> Option<f32> {
+    let next_depth = depth + 1;
+    if next_depth < request.path_tracing.rr_start_depth {
+        return Some(1.0);
+    }
+
+    let min_survival = request.path_tracing.rr_min_survival.clamp(0.0, 1.0);
+    let survival = continuation.clamp(0.0, 1.0).max(min_survival);
+    if survival <= RAY_EPSILON {
+        return None;
+    }
+
+    if survival >= 1.0 {
+        return Some(1.0);
+    }
+
+    let rr_sample = hash01(seed ^ ((next_depth as u64 + 1) * 0xd1b5_4a32));
+    if rr_sample > survival {
+        None
+    } else {
+        Some(1.0 / survival)
     }
 }

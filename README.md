@@ -8,7 +8,7 @@ modular BSDF-based PBR shading and a spectral ray-tracing path.
 - `cherry-core`: shared scene/camera/BSDF/primitive types, spectral contracts/utilities, and `SceneProvider` (includes glTF-style metallic-roughness + transmission `GltfMrBsdf`)
 - `cherry-render`: typed backend traits, runtime-erased registry, frame sink events, render orchestration
 - `cherry-backend-raster`: CPU software raster backend
-- `cherry-backend-ray`: CPU ray backends (`ray.normal`, `ray.montecarlo`, `ray.spectral`) with BSDF-driven path tracing and pluggable `Accel` trait (`BruteForceAccel`)
+- `cherry-backend-ray`: CPU ray backends (`ray.normal`, `ray.montecarlo` path tracing, `ray.spectral`) with BSDF-driven path tracing and pluggable `Accel` trait (`BruteForceAccel`)
 - `cherry-app`: thin CLI runner over the library APIs
 - `cherry-gui`: native desktop GUI preview app (`eframe` + `egui`) for realtime progressive frame display
 
@@ -41,7 +41,7 @@ Launch GUI preview app (single-frame realtime scanline preview, render controls,
 cargo run -p cherry-gui
 ```
 
-Use `--spp` (or `--samples-per-pixel`) to control sampling:
+Use `--spp` (or `--samples-per-pixel`) to control path tracing sampling:
 
 ```bash
 cargo run -p cherry-app -- --backend=ray.montecarlo --spp=8 --frames=1
@@ -51,6 +51,12 @@ Use `--cpu-threads` to control CPU multi-core worker count (omit for auto/defaul
 
 ```bash
 cargo run -p cherry-app -- --backend=ray.montecarlo --spp=8 --cpu-threads=8 --frames=1
+```
+
+`ray.montecarlo` is the path tracing backend ID (kept for compatibility). Path tracing controls:
+
+```bash
+cargo run -p cherry-app -- --backend=ray.montecarlo --spp=8 --rr-start-depth=3 --rr-min-survival=0.05 --indirect-clamp=10 --direct-lighting=true --frames=1
 ```
 
 Use the spectral backend (hero wavelength sampling, CIE XYZ mapping, exposure + Reinhard):

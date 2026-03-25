@@ -169,6 +169,7 @@ mod tests {
                 time: 0.0,
                 samples_per_pixel: 1,
                 max_bounces: 3,
+                path_tracing: Default::default(),
             },
         }
     }
