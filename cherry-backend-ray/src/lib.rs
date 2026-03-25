@@ -10,7 +10,7 @@ use cherry_core::{
 };
 use cherry_render::{
     BackendCapabilities, BackendId, BackendMetadata, BackendRegistry, PixelRadiance, RenderBackend,
-    RenderStats, SPECTRAL_BIN_COUNT, TypedRenderResult, TypedScanline,
+    RenderStats, SPECTRAL_BIN_COUNT, TypedScanline,
 };
 use nalgebra::{Point3, Vector2, Vector3};
 use tracer::{MonteCarloTracer, NormalTracer, Tracer};
@@ -149,30 +149,28 @@ impl RenderBackend for SpectralRayBackend {
         self.metadata.clone()
     }
 
-    fn render_frame_typed(
+    fn render_scanlines(
         &self,
         scene: &SceneSnapshot,
         request: &FrameRequest,
-    ) -> TypedRenderResult<Self::Pixel> {
+        emit_scanline: &mut dyn FnMut(TypedScanline<Self::Pixel>),
+    ) -> RenderStats {
         let start = Instant::now();
-        let mut scanlines = Vec::with_capacity(request.height as usize);
 
         for y in 0..request.height {
             let mut pixels = Vec::with_capacity(request.width as usize);
             for x in 0..request.width {
                 pixels.push(self.trace_pixel(scene, request, x, y));
             }
-            scanlines.push(TypedScanline { y, pixels });
+            emit_scanline(TypedScanline { y, pixels });
         }
 
-        let stats = RenderStats {
+        RenderStats {
             backend_id: self.metadata.id.clone(),
             frame_index: request.frame_index,
             elapsed: start.elapsed(),
             samples_per_pixel: request.samples_per_pixel,
-        };
-
-        TypedRenderResult { scanlines, stats }
+        }
     }
 }
 
@@ -243,13 +241,13 @@ impl RenderBackend for RayBackend {
         self.metadata.clone()
     }
 
-    fn render_frame_typed(
+    fn render_scanlines(
         &self,
         scene: &SceneSnapshot,
         request: &FrameRequest,
-    ) -> TypedRenderResult<Self::Pixel> {
+        emit_scanline: &mut dyn FnMut(TypedScanline<Self::Pixel>),
+    ) -> RenderStats {
         let start = Instant::now();
-        let mut scanlines = Vec::with_capacity(request.height as usize);
 
         for y in 0..request.height {
             let mut pixels = Vec::with_capacity(request.width as usize);
@@ -257,17 +255,15 @@ impl RenderBackend for RayBackend {
                 let color = self.trace_pixel(scene, request, x, y);
                 pixels.push(color);
             }
-            scanlines.push(TypedScanline { y, pixels });
+            emit_scanline(TypedScanline { y, pixels });
         }
 
-        let stats = RenderStats {
+        RenderStats {
             backend_id: self.metadata.id.clone(),
             frame_index: request.frame_index,
             elapsed: start.elapsed(),
             samples_per_pixel: request.samples_per_pixel,
-        };
-
-        TypedRenderResult { scanlines, stats }
+        }
     }
 }
 

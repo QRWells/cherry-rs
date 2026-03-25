@@ -81,11 +81,24 @@ pub trait RenderBackend: Send + Sync {
 
     fn metadata(&self) -> BackendMetadata;
 
+    fn render_scanlines(
+        &self,
+        scene: &SceneSnapshot,
+        request: &FrameRequest,
+        emit_scanline: &mut dyn FnMut(TypedScanline<Self::Pixel>),
+    ) -> RenderStats;
+
     fn render_frame_typed(
         &self,
         scene: &SceneSnapshot,
         request: &FrameRequest,
-    ) -> TypedRenderResult<Self::Pixel>;
+    ) -> TypedRenderResult<Self::Pixel> {
+        let mut scanlines = Vec::with_capacity(request.height as usize);
+        let stats = self.render_scanlines(scene, request, &mut |scanline| {
+            scanlines.push(scanline);
+        });
+        TypedRenderResult { scanlines, stats }
+    }
 
     fn render_frame(
         &self,
@@ -99,10 +112,8 @@ pub trait RenderBackend: Send + Sync {
             request: request.clone(),
         });
 
-        let typed = self.render_frame_typed(scene, request);
         let mut image = image::RgbImage::new(request.width, request.height);
-
-        for scanline in typed.scanlines {
+        let stats = self.render_scanlines(scene, request, &mut |scanline| {
             let mut rgb_scanline = Vec::with_capacity(scanline.pixels.len());
             let mut spectral_scanline = Vec::with_capacity(scanline.pixels.len());
             let mut has_spectral = false;
@@ -125,16 +136,13 @@ pub trait RenderBackend: Send + Sync {
                 pixels: rgb_scanline,
                 spectral: has_spectral.then_some(spectral_scanline),
             });
-        }
-
-        sink.on_event(FrameEvent::End {
-            stats: typed.stats.clone(),
         });
 
-        RenderResult {
-            image,
-            stats: typed.stats,
-        }
+        sink.on_event(FrameEvent::End {
+            stats: stats.clone(),
+        });
+
+        RenderResult { image, stats }
     }
 }
 

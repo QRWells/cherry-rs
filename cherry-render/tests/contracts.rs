@@ -1,11 +1,11 @@
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use cherry_core::{Camera, Color, FrameRequest, SceneProvider, SceneSnapshot};
 use cherry_render::{
     BackendCapabilities, BackendId, BackendMetadata, BackendRegistry, FrameEvent, FrameSink,
     NoopFrameSink, PixelRadiance, RenderBackend, RenderStats, SPECTRAL_BIN_COUNT, SequenceSpec,
-    TypedRenderResult, TypedScanline, render_frame, render_sequence,
+    TypedScanline, render_frame, render_sequence,
 };
 use nalgebra::{Point3, Vector3};
 
@@ -53,27 +53,25 @@ impl RenderBackend for MockBackend {
         }
     }
 
-    fn render_frame_typed(
+    fn render_scanlines(
         &self,
         _scene: &SceneSnapshot,
         request: &FrameRequest,
-    ) -> TypedRenderResult<Self::Pixel> {
-        let mut scanlines = Vec::with_capacity(request.height as usize);
+        emit_scanline: &mut dyn FnMut(TypedScanline<Self::Pixel>),
+    ) -> RenderStats {
         for y in 0..request.height {
-            scanlines.push(TypedScanline {
+            emit_scanline(TypedScanline {
                 y,
                 pixels: vec![Color::new(0.25, 0.5, 0.75); request.width as usize],
             });
         }
 
-        let stats = RenderStats {
+        RenderStats {
             backend_id: BackendId::new("mock"),
             frame_index: request.frame_index,
             elapsed: Duration::from_millis(1),
             samples_per_pixel: request.samples_per_pixel,
-        };
-
-        TypedRenderResult { scanlines, stats }
+        }
     }
 }
 
@@ -109,31 +107,29 @@ impl RenderBackend for MockSpectralBackend {
         }
     }
 
-    fn render_frame_typed(
+    fn render_scanlines(
         &self,
         _scene: &SceneSnapshot,
         request: &FrameRequest,
-    ) -> TypedRenderResult<Self::Pixel> {
-        let mut scanlines = Vec::with_capacity(request.height as usize);
+        emit_scanline: &mut dyn FnMut(TypedScanline<Self::Pixel>),
+    ) -> RenderStats {
         for y in 0..request.height {
             let pixel = MockSpectralPixel {
                 color: Color::new(0.2, 0.3, 0.4),
                 bins: [0.1; SPECTRAL_BIN_COUNT],
             };
-            scanlines.push(TypedScanline {
+            emit_scanline(TypedScanline {
                 y,
                 pixels: vec![pixel; request.width as usize],
             });
         }
 
-        let stats = RenderStats {
+        RenderStats {
             backend_id: BackendId::new("mock.spectral"),
             frame_index: request.frame_index,
             elapsed: Duration::from_millis(1),
             samples_per_pixel: request.samples_per_pixel,
-        };
-
-        TypedRenderResult { scanlines, stats }
+        }
     }
 }
 
@@ -329,4 +325,142 @@ fn spectral_backend_scanline_emits_optional_spectral_payload() {
     .unwrap();
 
     assert!(sink.saw_spectral_scanline);
+}
+
+struct EventSignalSink {
+    tx: mpsc::Sender<&'static str>,
+}
+
+impl FrameSink for EventSignalSink {
+    fn on_event(&mut self, event: FrameEvent) {
+        let label = match event {
+            FrameEvent::Begin { .. } => "begin",
+            FrameEvent::Scanline { .. } => "scanline",
+            FrameEvent::End { .. } => "end",
+        };
+        let _ = self.tx.send(label);
+    }
+}
+
+struct BlockingBackend {
+    ready_tx: mpsc::Sender<()>,
+    allow_finish_rx: Arc<Mutex<mpsc::Receiver<()>>>,
+}
+
+impl RenderBackend for BlockingBackend {
+    type Pixel = Color;
+
+    fn metadata(&self) -> BackendMetadata {
+        BackendMetadata {
+            id: BackendId::new("mock.blocking"),
+            display_name: "Mock Blocking Backend".to_string(),
+            capabilities: BackendCapabilities {
+                progressive_updates: true,
+                gpu_ready_interface: false,
+            },
+        }
+    }
+
+    fn render_scanlines(
+        &self,
+        _scene: &SceneSnapshot,
+        request: &FrameRequest,
+        emit_scanline: &mut dyn FnMut(TypedScanline<Self::Pixel>),
+    ) -> RenderStats {
+        let first = TypedScanline {
+            y: 0,
+            pixels: vec![Color::new(0.1, 0.2, 0.3); request.width as usize],
+        };
+        emit_scanline(first);
+
+        let _ = self.ready_tx.send(());
+        let _ = self
+            .allow_finish_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(1));
+
+        let second = TypedScanline {
+            y: 1,
+            pixels: vec![Color::new(0.3, 0.2, 0.1); request.width as usize],
+        };
+        emit_scanline(second);
+
+        RenderStats {
+            backend_id: BackendId::new("mock.blocking"),
+            frame_index: request.frame_index,
+            elapsed: Duration::from_millis(1),
+            samples_per_pixel: request.samples_per_pixel,
+        }
+    }
+}
+
+#[test]
+fn scanline_event_is_emitted_before_backend_completion() {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (allow_finish_tx, allow_finish_rx) = mpsc::channel();
+    let allow_finish_rx = Arc::new(Mutex::new(allow_finish_rx));
+
+    let mut registry = BackendRegistry::new();
+    {
+        let ready_tx = ready_tx.clone();
+        let allow_finish_rx = Arc::clone(&allow_finish_rx);
+        registry.register_factory(
+            BackendId::new("mock.blocking"),
+            Arc::new(move || {
+                Box::new(BlockingBackend {
+                    ready_tx: ready_tx.clone(),
+                    allow_finish_rx: Arc::clone(&allow_finish_rx),
+                })
+            }),
+        );
+    }
+
+    let provider = MockSceneProvider::new();
+    let request = FrameRequest {
+        width: 4,
+        height: 2,
+        frame_index: 0,
+        time: 0.0,
+        samples_per_pixel: 1,
+        max_bounces: 1,
+    };
+
+    let (event_tx, event_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut sink = EventSignalSink { tx: event_tx };
+        let _ = render_frame(
+            &registry,
+            &provider,
+            &BackendId::new("mock.blocking"),
+            &request,
+            &mut sink,
+        );
+    });
+
+    ready_rx
+        .recv_timeout(Duration::from_millis(250))
+        .expect("backend should report first-row work");
+
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut saw_scanline = false;
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok("scanline") => {
+                saw_scanline = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let _ = allow_finish_tx.send(());
+    let _ = handle.join();
+
+    assert!(
+        saw_scanline,
+        "expected at least one scanline event before backend completion"
+    );
 }

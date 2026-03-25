@@ -54,7 +54,7 @@ impl SceneProvider for AnimatedSceneProvider {
 
         scene.add_light(Arc::new(PointSpectralLight::from_rgb(
             Point3::new(1.5, 2.0, 1.0),
-            Color::new(6.0, 5.5, 5.0),
+            Color::new(0.5, 0.55, 0.2),
         )));
         scene.add_light(Arc::new(DirectionalSpectralLight::from_rgb(
             Vector3::new(-1.0, -1.0, -0.4),
