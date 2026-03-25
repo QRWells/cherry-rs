@@ -12,6 +12,15 @@ spectral ray-tracing path.
 - `cherry-app`: thin CLI runner over the library APIs
 - `cherry-gui`: native desktop GUI preview app (`eframe` + `egui`) for realtime progressive frame display
 
+## CI/CD
+
+- CI workflow (`.github/workflows/ci.yml`) runs on push and pull request with:
+  - `cargo fmt --all -- --check`
+  - `cargo check --workspace`
+  - `cargo test --workspace`
+- Release workflow (`.github/workflows/release.yml`) builds `cherry-app` and `cherry-gui` on Linux, macOS, and Windows.
+- Push a `v*` tag (example: `v0.1.0`) to automatically publish a GitHub Release with packaged binaries.
+
 ## Run
 
 ```bash
