@@ -4,7 +4,10 @@ use std::{
     time::Duration,
 };
 
-use cherry_app::{DEFAULT_SPECTRAL_EXPOSURE, build_animated_scene_provider, build_registry};
+use cherry_app::{
+    DEFAULT_SPECTRAL_EXPOSURE, RuntimeRenderConfig, build_animated_scene_provider,
+    build_registry_with_config, initialize_gpu,
+};
 use cherry_core::{Color, FrameRequest};
 use cherry_render::{BackendId, FrameEvent, FrameSink, RenderStats, color_to_rgb8, render_frame};
 use eframe::egui;
@@ -16,6 +19,8 @@ pub struct RenderParams {
     pub height: u32,
     pub samples_per_pixel: u32,
     pub max_bounces: u32,
+    pub cpu_threads: Option<usize>,
+    pub init_gpu: bool,
 }
 
 impl Default for RenderParams {
@@ -26,6 +31,8 @@ impl Default for RenderParams {
             height: 180,
             samples_per_pixel: 1,
             max_bounces: 3,
+            cpu_threads: None,
+            init_gpu: false,
         }
     }
 }
@@ -227,8 +234,22 @@ impl GuiState {
     }
 }
 
-pub fn run_render_job(params: RenderParams, tx: Sender<WorkerMessage>) {
-    let registry = build_registry(DEFAULT_SPECTRAL_EXPOSURE);
+fn run_render_job_with_initializer(
+    params: RenderParams,
+    tx: Sender<WorkerMessage>,
+    initialize_gpu_fn: impl Fn() -> Result<(), String>,
+) {
+    if params.init_gpu
+        && let Err(error) = initialize_gpu_fn()
+    {
+        let _ = tx.send(WorkerMessage::Error(error));
+        return;
+    }
+
+    let registry = build_registry_with_config(RuntimeRenderConfig {
+        exposure: DEFAULT_SPECTRAL_EXPOSURE,
+        cpu_threads: params.cpu_threads,
+    });
     let provider = build_animated_scene_provider(params.width as f32 / params.height as f32);
     let backend_id = BackendId::new(params.backend_id);
 
@@ -247,6 +268,14 @@ pub fn run_render_job(params: RenderParams, tx: Sender<WorkerMessage>) {
     }
 }
 
+pub fn run_render_job(params: RenderParams, tx: Sender<WorkerMessage>) {
+    run_render_job_with_initializer(params, tx, || {
+        initialize_gpu()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+}
+
 struct CherryGuiApp {
     state: GuiState,
     backend_options: Vec<String>,
@@ -258,11 +287,14 @@ struct CherryGuiApp {
 
 impl CherryGuiApp {
     fn new() -> Self {
-        let backend_options = build_registry(DEFAULT_SPECTRAL_EXPOSURE)
-            .list_ids()
-            .into_iter()
-            .map(|id| id.as_str().to_string())
-            .collect::<Vec<_>>();
+        let backend_options = build_registry_with_config(RuntimeRenderConfig {
+            exposure: DEFAULT_SPECTRAL_EXPOSURE,
+            cpu_threads: None,
+        })
+        .list_ids()
+        .into_iter()
+        .map(|id| id.as_str().to_string())
+        .collect::<Vec<_>>();
 
         let mut state = GuiState::new(RenderParams::default());
         if !backend_options.contains(&state.params.backend_id)
@@ -435,6 +467,29 @@ impl CherryGuiApp {
                             egui::DragValue::new(&mut self.state.params.max_bounces).range(1..=64),
                         );
                     });
+                    ui.horizontal(|ui| {
+                        let mut auto_threads = self.state.params.cpu_threads.is_none();
+                        if ui.checkbox(&mut auto_threads, "Auto CPU Threads").changed() {
+                            self.state.params.cpu_threads =
+                                if auto_threads { None } else { Some(1) };
+                        }
+                    });
+                    if let Some(cpu_threads) = self.state.params.cpu_threads {
+                        let mut thread_count = cpu_threads.max(1) as u32;
+                        ui.horizontal(|ui| {
+                            ui.label("CPU Threads");
+                            if ui
+                                .add(egui::DragValue::new(&mut thread_count).range(1..=256))
+                                .changed()
+                            {
+                                self.state.params.cpu_threads = Some(thread_count as usize);
+                            }
+                        });
+                    }
+                    ui.checkbox(
+                        &mut self.state.params.init_gpu,
+                        "Initialize GPU before render",
+                    );
                 });
 
                 ui.separator();
@@ -620,6 +675,8 @@ mod tests {
             height: 16,
             samples_per_pixel: 1,
             max_bounces: 1,
+            cpu_threads: None,
+            init_gpu: false,
         };
 
         let (tx, rx) = mpsc::channel();
@@ -648,5 +705,38 @@ mod tests {
             labels.iter().filter(|label| **label == "scanline").count(),
             params.height as usize
         );
+    }
+
+    #[test]
+    fn default_params_keep_gpu_init_disabled_and_cpu_threads_auto() {
+        let params = RenderParams::default();
+        assert_eq!(params.cpu_threads, None);
+        assert!(!params.init_gpu);
+    }
+
+    #[test]
+    fn worker_job_reports_error_when_gpu_init_fails() {
+        let params = RenderParams {
+            backend_id: "raster.simple".to_string(),
+            width: 8,
+            height: 8,
+            samples_per_pixel: 1,
+            max_bounces: 1,
+            cpu_threads: None,
+            init_gpu: true,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        super::run_render_job_with_initializer(params, tx, || {
+            Err("gpu init failed for test".to_string())
+        });
+
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(WorkerMessage::Error(message)) => {
+                assert!(message.contains("gpu init failed for test"));
+            }
+            Ok(other) => panic!("expected error event, got {:?}", other),
+            Err(err) => panic!("expected event, got channel error: {err}"),
+        }
     }
 }

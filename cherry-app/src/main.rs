@@ -1,7 +1,10 @@
 mod cli;
 mod progress;
 
-use cherry_app::{build_animated_scene_provider, build_registry, output_filename};
+use cherry_app::{
+    RuntimeRenderConfig, build_animated_scene_provider, build_registry_with_config, initialize_gpu,
+    output_filename,
+};
 use cherry_core::FrameRequest;
 use cherry_render::{BackendId, SequenceSpec, render_frame, render_sequence};
 use clap::Parser;
@@ -16,7 +19,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let registry = build_registry(cli.exposure);
+    let registry = build_registry_with_config(RuntimeRenderConfig {
+        exposure: cli.exposure,
+        cpu_threads: cli.cpu_threads,
+    });
     let available_backends = registry
         .list_ids()
         .into_iter()
@@ -29,6 +35,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&cli.output_dir)?;
 
     let provider = build_animated_scene_provider(cli.width as f32 / cli.height as f32);
+
+    if cli.init_gpu {
+        let info = initialize_gpu()?;
+        println!(
+            "Initialized GPU adapter '{}' ({}, {})",
+            info.adapter_name, info.backend, info.device_type
+        );
+    }
 
     let backend_id = BackendId::new(cli.backend.clone());
     let request = FrameRequest {

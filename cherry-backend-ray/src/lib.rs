@@ -14,6 +14,7 @@ use cherry_render::{
     RenderStats, SPECTRAL_BIN_COUNT, TypedScanline,
 };
 use nalgebra::{Point3, Vector2, Vector3};
+use rayon::prelude::*;
 use tracer::{MonteCarloTracer, NormalTracer, Tracer};
 
 pub use accel::{Accel as RayAccel, BruteForceAccel as RayBruteForceAccel};
@@ -33,6 +34,7 @@ pub struct RayBackend {
     metadata: BackendMetadata,
     tracer: Arc<dyn Tracer>,
     accel: Arc<dyn Accel>,
+    cpu_threads: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,14 +57,19 @@ pub struct SpectralRayBackend {
     metadata: BackendMetadata,
     accel: Arc<dyn Accel>,
     exposure: f32,
+    cpu_threads: Option<usize>,
 }
 
 impl SpectralRayBackend {
     pub fn new() -> Self {
-        Self::with_exposure(1.0)
+        Self::with_exposure_and_threads(1.0, None)
     }
 
     pub fn with_exposure(exposure: f32) -> Self {
+        Self::with_exposure_and_threads(exposure, None)
+    }
+
+    pub fn with_exposure_and_threads(exposure: f32, cpu_threads: Option<usize>) -> Self {
         Self {
             metadata: BackendMetadata {
                 id: BackendId::new(RAY_SPECTRAL_BACKEND_ID),
@@ -74,6 +81,7 @@ impl SpectralRayBackend {
             },
             accel: Arc::new(BruteForceAccel),
             exposure,
+            cpu_threads,
         }
     }
 
@@ -158,12 +166,24 @@ impl RenderBackend for SpectralRayBackend {
         emit_scanline: &mut dyn FnMut(TypedScanline<Self::Pixel>),
     ) -> RenderStats {
         let start = Instant::now();
+        let configured_pool = self.cpu_threads.and_then(|threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .ok()
+        });
 
         for y in 0..request.height {
-            let mut pixels = Vec::with_capacity(request.width as usize);
-            for x in 0..request.width {
-                pixels.push(self.trace_pixel(scene, request, x, y));
-            }
+            let compute_scanline = || {
+                (0..request.width)
+                    .into_par_iter()
+                    .map(|x| self.trace_pixel(scene, request, x, y))
+                    .collect::<Vec<_>>()
+            };
+            let pixels = match &configured_pool {
+                Some(pool) => pool.install(compute_scanline),
+                None => compute_scanline(),
+            };
             emit_scanline(TypedScanline { y, pixels });
         }
 
@@ -178,13 +198,21 @@ impl RenderBackend for SpectralRayBackend {
 
 impl RayBackend {
     pub fn with_method(method: TraceMethod) -> Self {
+        Self::with_method_and_threads(method, None)
+    }
+
+    pub fn with_method_and_threads(method: TraceMethod, cpu_threads: Option<usize>) -> Self {
         match method {
-            TraceMethod::Normal => Self::normal(),
-            TraceMethod::MonteCarlo => Self::monte_carlo(),
+            TraceMethod::Normal => Self::normal_with_threads(cpu_threads),
+            TraceMethod::MonteCarlo => Self::monte_carlo_with_threads(cpu_threads),
         }
     }
 
     pub fn normal() -> Self {
+        Self::normal_with_threads(None)
+    }
+
+    pub fn normal_with_threads(cpu_threads: Option<usize>) -> Self {
         Self {
             metadata: BackendMetadata {
                 id: BackendId::new(RAY_NORMAL_BACKEND_ID),
@@ -196,10 +224,15 @@ impl RayBackend {
             },
             tracer: Arc::new(NormalTracer),
             accel: Arc::new(BruteForceAccel),
+            cpu_threads,
         }
     }
 
     pub fn monte_carlo() -> Self {
+        Self::monte_carlo_with_threads(None)
+    }
+
+    pub fn monte_carlo_with_threads(cpu_threads: Option<usize>) -> Self {
         Self {
             metadata: BackendMetadata {
                 id: BackendId::new(RAY_MONTE_CARLO_BACKEND_ID),
@@ -211,6 +244,7 @@ impl RayBackend {
             },
             tracer: Arc::new(MonteCarloTracer),
             accel: Arc::new(BruteForceAccel),
+            cpu_threads,
         }
     }
 
@@ -250,13 +284,24 @@ impl RenderBackend for RayBackend {
         emit_scanline: &mut dyn FnMut(TypedScanline<Self::Pixel>),
     ) -> RenderStats {
         let start = Instant::now();
+        let configured_pool = self.cpu_threads.and_then(|threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .ok()
+        });
 
         for y in 0..request.height {
-            let mut pixels = Vec::with_capacity(request.width as usize);
-            for x in 0..request.width {
-                let color = self.trace_pixel(scene, request, x, y);
-                pixels.push(color);
-            }
+            let compute_scanline = || {
+                (0..request.width)
+                    .into_par_iter()
+                    .map(|x| self.trace_pixel(scene, request, x, y))
+                    .collect::<Vec<_>>()
+            };
+            let pixels = match &configured_pool {
+                Some(pool) => pool.install(compute_scanline),
+                None => compute_scanline(),
+            };
             emit_scanline(TypedScanline { y, pixels });
         }
 
@@ -270,21 +315,34 @@ impl RenderBackend for RayBackend {
 }
 
 pub fn register_backends(registry: &mut BackendRegistry) {
-    register_backends_with_exposure(registry, 1.0);
+    register_backends_with_exposure_and_threads(registry, 1.0, None);
 }
 
 pub fn register_backends_with_exposure(registry: &mut BackendRegistry, exposure: f32) {
+    register_backends_with_exposure_and_threads(registry, exposure, None);
+}
+
+pub fn register_backends_with_exposure_and_threads(
+    registry: &mut BackendRegistry,
+    exposure: f32,
+    cpu_threads: Option<usize>,
+) {
     registry.register_factory(
         BackendId::new(RAY_NORMAL_BACKEND_ID),
-        Arc::new(|| Box::new(RayBackend::normal())),
+        Arc::new(move || Box::new(RayBackend::normal_with_threads(cpu_threads))),
     );
     registry.register_factory(
         BackendId::new(RAY_MONTE_CARLO_BACKEND_ID),
-        Arc::new(|| Box::new(RayBackend::monte_carlo())),
+        Arc::new(move || Box::new(RayBackend::monte_carlo_with_threads(cpu_threads))),
     );
     registry.register_factory(
         BackendId::new(RAY_SPECTRAL_BACKEND_ID),
-        Arc::new(move || Box::new(SpectralRayBackend::with_exposure(exposure))),
+        Arc::new(move || {
+            Box::new(SpectralRayBackend::with_exposure_and_threads(
+                exposure,
+                cpu_threads,
+            ))
+        }),
     );
 }
 

@@ -104,3 +104,28 @@ fn raster_backend_preserves_material_channel_on_x_face() {
         center
     );
 }
+
+#[test]
+fn raster_backend_is_deterministic_across_thread_counts() {
+    let material = Arc::new(GltfMrBsdf::opaque(Color::new(0.6, 0.35, 0.2), 0.0, 0.5));
+    let sphere = Arc::new(Sphere::new(Point3::new(0.0, 0.0, 0.0), 0.9, material));
+
+    let mut scene = SceneSnapshot::new(test_camera()).with_background(Color::new(0.02, 0.02, 0.02));
+    scene.add_primitive(sphere);
+
+    let request = FrameRequest {
+        width: 40,
+        height: 24,
+        frame_index: 2,
+        time: 0.0,
+        samples_per_pixel: 1,
+        max_bounces: 1,
+    };
+
+    let mut sink = NoopFrameSink;
+    let single = RasterBackend::with_threads(Some(1)).render_frame(&scene, &request, &mut sink);
+    let mut sink = NoopFrameSink;
+    let multi = RasterBackend::with_threads(Some(4)).render_frame(&scene, &request, &mut sink);
+
+    assert_eq!(single.image, multi.image);
+}

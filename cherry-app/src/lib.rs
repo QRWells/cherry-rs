@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use cherry_backend_raster::register_backends as register_raster_backends;
-use cherry_backend_ray::register_backends_with_exposure as register_ray_backends_with_exposure;
+use cherry_backend_raster::register_backends_with_threads as register_raster_backends_with_threads;
+use cherry_backend_ray::register_backends_with_exposure_and_threads as register_ray_backends_with_exposure_and_threads;
 use cherry_core::{
     Bsdf, Camera, Color, Cuboid, GltfMrBsdf, PointSpectralLight, SceneProvider, SceneSnapshot,
 };
@@ -9,6 +9,70 @@ use cherry_render::BackendRegistry;
 use nalgebra::{Point3, Vector3};
 
 pub const DEFAULT_SPECTRAL_EXPOSURE: f32 = 0.2;
+
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeRenderConfig {
+    pub exposure: f32,
+    pub cpu_threads: Option<usize>,
+}
+
+impl Default for RuntimeRenderConfig {
+    fn default() -> Self {
+        Self {
+            exposure: DEFAULT_SPECTRAL_EXPOSURE,
+            cpu_threads: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuInitInfo {
+    pub adapter_name: String,
+    pub backend: String,
+    pub device_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpuInitError {
+    AdapterUnavailable,
+    RequestAdapter(String),
+    RequestDevice(String),
+}
+
+impl std::fmt::Display for GpuInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AdapterUnavailable => write!(f, "no compatible GPU adapter found"),
+            Self::RequestAdapter(message) => {
+                write!(f, "failed to request GPU adapter: {message}")
+            }
+            Self::RequestDevice(message) => {
+                write!(f, "failed to request GPU device: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GpuInitError {}
+
+trait AdapterRequestExt {
+    fn into_adapter_result(self) -> Result<wgpu::Adapter, GpuInitError>;
+}
+
+impl AdapterRequestExt for Option<wgpu::Adapter> {
+    fn into_adapter_result(self) -> Result<wgpu::Adapter, GpuInitError> {
+        self.ok_or(GpuInitError::AdapterUnavailable)
+    }
+}
+
+impl<E> AdapterRequestExt for Result<wgpu::Adapter, E>
+where
+    E: std::fmt::Display,
+{
+    fn into_adapter_result(self) -> Result<wgpu::Adapter, GpuInitError> {
+        self.map_err(|error| GpuInitError::RequestAdapter(error.to_string()))
+    }
+}
 
 pub struct AnimatedSceneProvider {
     camera: Camera,
@@ -109,10 +173,42 @@ pub fn build_animated_scene_provider(aspect_ratio: f32) -> AnimatedSceneProvider
 }
 
 pub fn build_registry(exposure: f32) -> BackendRegistry {
+    build_registry_with_config(RuntimeRenderConfig {
+        exposure,
+        cpu_threads: None,
+    })
+}
+
+pub fn build_registry_with_config(config: RuntimeRenderConfig) -> BackendRegistry {
     let mut registry = BackendRegistry::new();
-    register_raster_backends(&mut registry);
-    register_ray_backends_with_exposure(&mut registry, exposure);
+    register_raster_backends_with_threads(&mut registry, config.cpu_threads);
+    register_ray_backends_with_exposure_and_threads(
+        &mut registry,
+        config.exposure,
+        config.cpu_threads,
+    );
     registry
+}
+
+pub fn initialize_gpu() -> Result<GpuInitInfo, GpuInitError> {
+    let instance = wgpu::Instance::default();
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .into_adapter_result()?;
+    let info = adapter.get_info();
+
+    let descriptor = wgpu::DeviceDescriptor {
+        label: Some("cherry-gpu-init-device"),
+        ..Default::default()
+    };
+    let _ = pollster::block_on(adapter.request_device(&descriptor, None))
+        .map_err(|error| GpuInitError::RequestDevice(error.to_string()))?;
+
+    Ok(GpuInitInfo {
+        adapter_name: info.name,
+        backend: format!("{:?}", info.backend),
+        device_type: format!("{:?}", info.device_type),
+    })
 }
 
 pub fn output_filename(backend_id: &str, frame_index: Option<u32>) -> String {
@@ -150,6 +246,29 @@ mod tests {
     #[test]
     fn runtime_registry_contains_expected_backends() {
         let registry = super::build_registry(1.0);
+        let ids = registry
+            .list_ids()
+            .into_iter()
+            .map(|id| id.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            vec![
+                "raster.simple".to_string(),
+                "ray.montecarlo".to_string(),
+                "ray.normal".to_string(),
+                "ray.spectral".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_registry_with_config_contains_expected_backends() {
+        let registry = super::build_registry_with_config(super::RuntimeRenderConfig {
+            exposure: 0.35,
+            cpu_threads: Some(2),
+        });
         let ids = registry
             .list_ids()
             .into_iter()

@@ -6,15 +6,22 @@ use cherry_render::{
     TypedScanline,
 };
 use nalgebra::{Vector2, Vector3};
+use rayon::prelude::*;
 
 pub const RASTER_BACKEND_ID: &str = "raster.simple";
 const PREVIEW_AMBIENT: f32 = 0.2;
 
-pub struct RasterBackend;
+pub struct RasterBackend {
+    cpu_threads: Option<usize>,
+}
 
 impl RasterBackend {
     pub fn new() -> Self {
-        Self
+        Self::with_threads(None)
+    }
+
+    pub fn with_threads(cpu_threads: Option<usize>) -> Self {
+        Self { cpu_threads }
     }
 
     fn shade_pixel(scene: &SceneSnapshot, uv: Vector2<f32>) -> Color {
@@ -60,17 +67,31 @@ impl RenderBackend for RasterBackend {
         emit_scanline: &mut dyn FnMut(TypedScanline<Self::Pixel>),
     ) -> RenderStats {
         let start = Instant::now();
+        let configured_pool = self.cpu_threads.and_then(|threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .ok()
+        });
 
         for y in 0..request.height {
-            let mut pixels = Vec::with_capacity(request.width as usize);
-            for x in 0..request.width {
-                let uv = Vector2::new(
-                    (x as f32 + 0.5) / request.width as f32,
-                    (y as f32 + 0.5) / request.height as f32,
-                );
-                let color = Self::shade_pixel(scene, uv);
-                pixels.push(color);
-            }
+            let compute_scanline = || {
+                (0..request.width)
+                    .into_par_iter()
+                    .map(|x| {
+                        let uv = Vector2::new(
+                            (x as f32 + 0.5) / request.width as f32,
+                            (y as f32 + 0.5) / request.height as f32,
+                        );
+                        Self::shade_pixel(scene, uv)
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            let pixels = match &configured_pool {
+                Some(pool) => pool.install(compute_scanline),
+                None => compute_scanline(),
+            };
             emit_scanline(TypedScanline { y, pixels });
         }
 
@@ -84,8 +105,12 @@ impl RenderBackend for RasterBackend {
 }
 
 pub fn register_backends(registry: &mut BackendRegistry) {
+    register_backends_with_threads(registry, None);
+}
+
+pub fn register_backends_with_threads(registry: &mut BackendRegistry, cpu_threads: Option<usize>) {
     registry.register_factory(
         BackendId::new(RASTER_BACKEND_ID),
-        Arc::new(|| Box::new(RasterBackend::new())),
+        Arc::new(move || Box::new(RasterBackend::with_threads(cpu_threads))),
     );
 }

@@ -9,3 +9,4 @@ cherry-core = { path = "../cherry-core" }
 cherry-render = { path = "../cherry-render" }
 image.workspace = true
 nalgebra.workspace = true
+rayon.workspace = true

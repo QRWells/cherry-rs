@@ -43,6 +43,12 @@ pub struct Cli {
     )]
     pub exposure: f32,
 
+    #[arg(long, value_parser = parse_cpu_threads)]
+    pub cpu_threads: Option<usize>,
+
+    #[arg(long)]
+    pub init_gpu: bool,
+
     #[arg(long, default_value = "output")]
     pub output_dir: PathBuf,
 
@@ -89,6 +95,16 @@ pub fn validate_backend(
     Err(Cli::command().error(ErrorKind::InvalidValue, message))
 }
 
+fn parse_cpu_threads(raw: &str) -> Result<usize, String> {
+    let parsed = raw
+        .parse::<usize>()
+        .map_err(|_| format!("invalid CPU thread count '{raw}'"))?;
+    if parsed == 0 {
+        return Err("CPU thread count must be at least 1".to_string());
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -105,6 +121,8 @@ mod tests {
         assert_eq!(cli.samples_per_pixel, 1);
         assert_eq!(cli.max_bounces, 3);
         assert_eq!(cli.exposure, 0.2);
+        assert!(cli.cpu_threads.is_none());
+        assert!(!cli.init_gpu);
         assert_eq!(cli.output_dir.to_string_lossy(), "output");
         assert!(cli.command.is_none());
     }
@@ -124,6 +142,13 @@ mod tests {
     }
 
     #[test]
+    fn cpu_threads_and_gpu_init_parse() {
+        let cli = Cli::parse_from(["cherry-app", "--cpu-threads=6", "--init-gpu"]);
+        assert_eq!(cli.cpu_threads, Some(6));
+        assert!(cli.init_gpu);
+    }
+
+    #[test]
     fn unknown_flags_are_rejected() {
         let err = Cli::try_parse_from(["cherry-app", "--does-not-exist"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
@@ -138,6 +163,12 @@ mod tests {
     #[test]
     fn zero_values_are_rejected() {
         let err = Cli::try_parse_from(["cherry-app", "--height=0"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn zero_cpu_threads_is_rejected() {
+        let err = Cli::try_parse_from(["cherry-app", "--cpu-threads=0"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 

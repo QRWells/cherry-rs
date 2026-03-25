@@ -218,3 +218,51 @@ fn spectral_backend_preserves_material_channel_on_x_face() {
         center
     );
 }
+
+#[test]
+fn ray_backend_is_deterministic_across_thread_counts() {
+    let scene = test_scene();
+    let request = FrameRequest {
+        width: 32,
+        height: 20,
+        frame_index: 4,
+        time: 0.0,
+        samples_per_pixel: 3,
+        max_bounces: 3,
+    };
+
+    for method in [TraceMethod::Normal, TraceMethod::MonteCarlo] {
+        let backend_single = RayBackend::with_method_and_threads(method, Some(1));
+        let backend_multi = RayBackend::with_method_and_threads(method, Some(4));
+
+        let mut sink = NoopFrameSink;
+        let single = backend_single.render_frame(&scene, &request, &mut sink);
+        let mut sink = NoopFrameSink;
+        let multi = backend_multi.render_frame(&scene, &request, &mut sink);
+
+        assert_eq!(single.image, multi.image);
+    }
+}
+
+#[test]
+fn spectral_backend_is_deterministic_across_thread_counts() {
+    let scene = spectral_test_scene();
+    let request = FrameRequest {
+        width: 24,
+        height: 24,
+        frame_index: 1,
+        time: 0.0,
+        samples_per_pixel: 4,
+        max_bounces: 3,
+    };
+
+    let backend_single = SpectralRayBackend::with_exposure_and_threads(0.6, Some(1));
+    let backend_multi = SpectralRayBackend::with_exposure_and_threads(0.6, Some(4));
+
+    let mut sink = NoopFrameSink;
+    let single = backend_single.render_frame(&scene, &request, &mut sink);
+    let mut sink = NoopFrameSink;
+    let multi = backend_multi.render_frame(&scene, &request, &mut sink);
+
+    assert_eq!(single.image, multi.image);
+}

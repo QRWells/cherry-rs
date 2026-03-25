@@ -47,10 +47,22 @@ Use `--spp` (or `--samples-per-pixel`) to control sampling:
 cargo run -p cherry-app -- --backend=ray.montecarlo --spp=8 --frames=1
 ```
 
+Use `--cpu-threads` to control CPU multi-core worker count (omit for auto/default):
+
+```bash
+cargo run -p cherry-app -- --backend=ray.montecarlo --spp=8 --cpu-threads=8 --frames=1
+```
+
 Use the spectral backend (hero wavelength sampling, CIE XYZ mapping, exposure + Reinhard):
 
 ```bash
 cargo run -p cherry-app -- --backend=ray.spectral --spp=8 --exposure=1.25 --frames=1
+```
+
+Use `--init-gpu` to run `wgpu` adapter/device initialization at render start:
+
+```bash
+cargo run -p cherry-app -- --backend=ray.normal --init-gpu --frames=1
 ```
 
 Inspect CLI options:
