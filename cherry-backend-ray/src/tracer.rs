@@ -3,6 +3,8 @@ use nalgebra::Vector3;
 
 use crate::accel::Accel;
 
+const PREVIEW_AMBIENT: f32 = 0.2;
+
 pub trait Tracer: Send + Sync {
     fn trace(
         &self,
@@ -63,6 +65,13 @@ impl MonteCarloTracer {
     }
 }
 
+fn preview_diffuse(normal: Vector3<f32>, albedo: Color) -> Color {
+    let key_light_dir = Vector3::new(-0.4, 0.8, 0.45).normalize();
+    let diffuse = normal.dot(&key_light_dir).max(0.0);
+    let shade = PREVIEW_AMBIENT + (1.0 - PREVIEW_AMBIENT) * diffuse;
+    albedo * shade
+}
+
 impl Tracer for MonteCarloTracer {
     fn trace(
         &self,
@@ -83,10 +92,10 @@ impl Tracer for MonteCarloTracer {
         };
 
         let albedo = hit.material.albedo();
-        let normal_tint = hit.normal.abs().component_mul(&albedo) * 0.7;
+        let direct_preview = preview_diffuse(hit.normal, albedo);
 
         if depth + 1 >= request.max_bounces.max(1) {
-            return normal_tint;
+            return direct_preview;
         }
 
         let bounce_dir = Self::sample_hemisphere(hit.normal, seed ^ depth as u64);
@@ -100,6 +109,6 @@ impl Tracer for MonteCarloTracer {
             seed ^ 0x9e37_79b9,
         );
 
-        normal_tint + indirect.component_mul(&albedo) * 0.3
+        direct_preview + indirect.component_mul(&albedo) * 0.3
     }
 }

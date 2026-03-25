@@ -20,6 +20,18 @@ fn test_camera() -> Camera {
     )
 }
 
+fn x_face_camera() -> Camera {
+    Camera::new(
+        Point3::new(-3.0, 0.0, 0.0),
+        Point3::new(0.0, 0.0, 0.0),
+        Vector3::y_axis().into_inner(),
+        40.0,
+        1.0,
+        0.0,
+        1.0,
+    )
+}
+
 fn test_scene() -> SceneSnapshot {
     let red = Arc::new(Lambertian::new(Color::new(0.8, 0.2, 0.2)));
     let blue = Arc::new(Lambertian::new(Color::new(0.2, 0.3, 0.8)));
@@ -61,6 +73,31 @@ fn spectral_test_scene() -> SceneSnapshot {
         Color::new(0.4, 0.5, 0.6),
     )));
 
+    scene
+}
+
+fn green_x_face_scene() -> SceneSnapshot {
+    let mut scene = SceneSnapshot::new(x_face_camera()).with_background(Color::new(0.0, 0.0, 0.0));
+    scene.add_primitive(Arc::new(Cuboid::new(
+        Point3::new(-1.0, -1.0, -1.0),
+        Point3::new(1.0, 1.0, 1.0),
+        Arc::new(Lambertian::new(Color::new(0.0, 1.0, 0.0))),
+    )));
+    scene
+}
+
+fn spectral_green_x_face_scene() -> SceneSnapshot {
+    let mut scene = SceneSnapshot::new(x_face_camera())
+        .with_spectral_background(rgb_to_emission_spectrum(Color::new(0.0, 0.0, 0.0)));
+    scene.add_primitive(Arc::new(Cuboid::new(
+        Point3::new(-1.0, -1.0, -1.0),
+        Point3::new(1.0, 1.0, 1.0),
+        Arc::new(SpectralLambertian::from_rgb(Color::new(0.0, 1.0, 0.0))),
+    )));
+    scene.add_light(Arc::new(PointSpectralLight::from_rgb(
+        Point3::new(-3.0, 1.2, 0.4),
+        Color::new(1.0, 1.0, 1.0),
+    )));
     scene
 }
 
@@ -120,5 +157,53 @@ fn spectral_backend_renders_and_is_deterministic() {
     assert_eq!(
         typed_a.scanlines[10].pixels[10],
         typed_b.scanlines[10].pixels[10]
+    );
+}
+
+#[test]
+fn monte_carlo_backend_preserves_material_channel_on_x_face() {
+    let scene = green_x_face_scene();
+    let request = FrameRequest {
+        width: 32,
+        height: 32,
+        frame_index: 0,
+        time: 0.0,
+        samples_per_pixel: 1,
+        max_bounces: 1,
+    };
+
+    let backend = RayBackend::with_method(TraceMethod::MonteCarlo);
+    let mut sink = NoopFrameSink;
+    let result = backend.render_frame(&scene, &request, &mut sink);
+    let center = result.image.get_pixel(16, 16).0;
+
+    assert!(
+        center[1] > center[0] && center[1] > center[2],
+        "expected green channel dominance on x-face material, got {:?}",
+        center
+    );
+}
+
+#[test]
+fn spectral_backend_preserves_material_channel_on_x_face() {
+    let scene = spectral_green_x_face_scene();
+    let request = FrameRequest {
+        width: 32,
+        height: 32,
+        frame_index: 0,
+        time: 0.0,
+        samples_per_pixel: 128,
+        max_bounces: 1,
+    };
+
+    let backend = SpectralRayBackend::with_exposure(1.0);
+    let mut sink = NoopFrameSink;
+    let result = backend.render_frame(&scene, &request, &mut sink);
+    let center = result.image.get_pixel(16, 16).0;
+
+    assert!(
+        center[1] > center[0] && center[1] > center[2],
+        "expected green channel dominance in spectral path, got {:?}",
+        center
     );
 }

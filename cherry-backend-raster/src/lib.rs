@@ -5,9 +5,10 @@ use cherry_render::{
     BackendCapabilities, BackendId, BackendMetadata, BackendRegistry, RenderBackend, RenderStats,
     TypedScanline,
 };
-use nalgebra::Vector2;
+use nalgebra::{Vector2, Vector3};
 
 pub const RASTER_BACKEND_ID: &str = "raster.simple";
+const PREVIEW_AMBIENT: f32 = 0.2;
 
 pub struct RasterBackend;
 
@@ -19,10 +20,17 @@ impl RasterBackend {
     fn shade_pixel(scene: &SceneSnapshot, uv: Vector2<f32>) -> Color {
         let ray = scene.camera.generate_ray(uv);
         match scene.intersect(&ray) {
-            Some(hit) => hit.normal.abs().component_mul(&hit.material.albedo()),
+            Some(hit) => preview_diffuse(hit.normal, hit.material.albedo()),
             None => scene.background,
         }
     }
+}
+
+fn preview_diffuse(normal: Vector3<f32>, albedo: Color) -> Color {
+    let key_light_dir = Vector3::new(-0.4, 0.8, 0.45).normalize();
+    let diffuse = normal.dot(&key_light_dir).max(0.0);
+    let shade = PREVIEW_AMBIENT + (1.0 - PREVIEW_AMBIENT) * diffuse;
+    albedo * shade
 }
 
 impl Default for RasterBackend {
