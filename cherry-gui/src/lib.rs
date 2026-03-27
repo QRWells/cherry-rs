@@ -1,3 +1,5 @@
+mod scene_editor;
+
 use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -5,13 +7,19 @@ use std::{
 };
 
 use cherry_app::{
-    CameraConfig, DEFAULT_SPECTRAL_EXPOSURE, RuntimeRenderConfig,
-    build_animated_scene_provider_with_camera, build_registry_with_config, initialize_gpu,
+    CameraConfig, DEFAULT_SPECTRAL_EXPOSURE, RuntimeRenderConfig, build_registry_with_config,
+    initialize_gpu,
 };
-use cherry_core::{Color, FrameRequest, PathTracingConfig};
+use cherry_core::{Color, FrameRequest, PathTracingConfig, StaticSceneProvider};
 use cherry_render::{BackendId, FrameEvent, FrameSink, RenderStats, color_to_rgb8, render_frame};
 use eframe::egui;
 use nalgebra::{Point3, Vector3};
+use scene_editor::{
+    AuthoredLight, AuthoredLightKind, AuthoredMaterial, AuthoredObject, AuthoredObjectKind,
+    AuthoredScene, SceneSelection,
+};
+
+const RASTER_PREVIEW_BACKEND_ID: &str = "raster.simple";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderParams {
@@ -95,8 +103,24 @@ impl RenderParams {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobMode {
+    Preview,
+    Render,
+}
+
+impl JobMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Preview => "Preview",
+            Self::Render => "Render",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderDoneStats {
+    pub mode: JobMode,
     pub backend_id: String,
     pub frame_index: u32,
     pub elapsed: Duration,
@@ -106,7 +130,8 @@ pub struct RenderDoneStats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderStatus {
     Idle,
-    Rendering {
+    Running {
+        mode: JobMode,
         backend_id: String,
         scanlines_done: u32,
         total_scanlines: u32,
@@ -147,13 +172,11 @@ impl PreviewBuffer {
         if y >= self.height {
             return false;
         }
-
         let pixel_count = self.width as usize;
         let write_count = pixel_count.min(pixels.len());
         if write_count == 0 {
             return false;
         }
-
         let row_offset = y as usize * pixel_count * 4;
         for (x, color) in pixels.iter().take(write_count).enumerate() {
             let rgb = color_to_rgb8(*color);
@@ -163,7 +186,6 @@ impl PreviewBuffer {
             self.pixels_rgba[offset + 2] = rgb.0[2];
             self.pixels_rgba[offset + 3] = 255;
         }
-
         true
     }
 }
@@ -171,6 +193,7 @@ impl PreviewBuffer {
 #[derive(Debug, Clone)]
 pub enum WorkerMessage {
     Begin {
+        mode: JobMode,
         backend_id: String,
         request: FrameRequest,
     },
@@ -179,6 +202,7 @@ pub enum WorkerMessage {
         pixels: Vec<Color>,
     },
     End {
+        mode: JobMode,
         stats: RenderStats,
     },
     Error(String),
@@ -186,11 +210,12 @@ pub enum WorkerMessage {
 
 struct ChannelFrameSink {
     tx: Sender<WorkerMessage>,
+    mode: JobMode,
 }
 
 impl ChannelFrameSink {
-    fn new(tx: Sender<WorkerMessage>) -> Self {
-        Self { tx }
+    fn new(tx: Sender<WorkerMessage>, mode: JobMode) -> Self {
+        Self { tx, mode }
     }
 }
 
@@ -199,6 +224,7 @@ impl FrameSink for ChannelFrameSink {
         match event {
             FrameEvent::Begin { backend, request } => {
                 let _ = self.tx.send(WorkerMessage::Begin {
+                    mode: self.mode,
                     backend_id: backend.id.as_str().to_string(),
                     request,
                 });
@@ -207,15 +233,72 @@ impl FrameSink for ChannelFrameSink {
                 let _ = self.tx.send(WorkerMessage::Scanline { y, pixels });
             }
             FrameEvent::End { stats } => {
-                let _ = self.tx.send(WorkerMessage::End { stats });
+                let _ = self.tx.send(WorkerMessage::End {
+                    mode: self.mode,
+                    stats,
+                });
             }
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct PreparedRenderJob {
+    pub mode: JobMode,
+    pub backend_id: BackendId,
+    pub request: FrameRequest,
+    runtime_config: RuntimeRenderConfig,
+    init_gpu: bool,
+    snapshot: cherry_core::SceneSnapshot,
+}
+
+impl PreparedRenderJob {
+    pub fn prepare(
+        mode: JobMode,
+        params: RenderParams,
+        scene: AuthoredScene,
+    ) -> Result<Self, String> {
+        let camera = params
+            .camera_config()
+            .to_camera(params.width as f32 / params.height as f32)?;
+        let snapshot = scene.to_snapshot(camera)?;
+        let backend_id = match mode {
+            JobMode::Preview => BackendId::new(RASTER_PREVIEW_BACKEND_ID),
+            JobMode::Render => BackendId::new(params.backend_id.clone()),
+        };
+        let request = FrameRequest {
+            width: params.width,
+            height: params.height,
+            frame_index: 0,
+            time: 0.0,
+            samples_per_pixel: params.samples_per_pixel,
+            max_bounces: params.max_bounces,
+            path_tracing: PathTracingConfig {
+                rr_start_depth: params.rr_start_depth,
+                rr_min_survival: params.rr_min_survival,
+                indirect_clamp: params.indirect_clamp,
+                direct_lighting: params.direct_lighting,
+            },
+        };
+        Ok(Self {
+            mode,
+            backend_id,
+            request,
+            runtime_config: RuntimeRenderConfig {
+                exposure: DEFAULT_SPECTRAL_EXPOSURE,
+                cpu_threads: params.cpu_threads,
+            },
+            init_gpu: params.init_gpu,
+            snapshot,
+        })
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuiState {
     pub params: RenderParams,
+    pub scene: AuthoredScene,
+    pub selected: Option<SceneSelection>,
     pub status: RenderStatus,
     pub preview: Option<PreviewBuffer>,
 }
@@ -224,32 +307,92 @@ impl GuiState {
     pub fn new(params: RenderParams) -> Self {
         Self {
             params,
+            scene: AuthoredScene::default(),
+            selected: None,
             status: RenderStatus::Idle,
             preview: None,
         }
     }
 
-    pub fn is_rendering(&self) -> bool {
-        matches!(self.status, RenderStatus::Rendering { .. })
+    pub fn is_busy(&self) -> bool {
+        matches!(self.status, RenderStatus::Running { .. })
     }
 
-    pub fn mark_rendering_requested(&mut self) {
-        self.status = RenderStatus::Rendering {
-            backend_id: self.params.backend_id.clone(),
+    pub fn mark_job_requested(&mut self, mode: JobMode, backend_id: String) {
+        self.status = RenderStatus::Running {
+            mode,
+            backend_id,
             scanlines_done: 0,
             total_scanlines: self.params.height,
         };
         self.preview = None;
     }
 
+    pub fn add_object(&mut self, kind: AuthoredObjectKind) -> u64 {
+        let id = self.scene.add_object(
+            format!("{} {}", kind.label(), self.scene.objects.len() + 1),
+            kind,
+            default_object_material(),
+        );
+        self.selected = Some(SceneSelection::Object(id));
+        id
+    }
+
+    pub fn add_light(&mut self, kind: AuthoredLightKind) -> u64 {
+        let id = self.scene.add_light(
+            format!("{} {}", kind.label(), self.scene.lights.len() + 1),
+            kind,
+        );
+        self.selected = Some(SceneSelection::Light(id));
+        id
+    }
+
+    pub fn remove_selected(&mut self) {
+        match self.selected {
+            Some(SceneSelection::Object(id)) => {
+                if self.scene.remove_object(id) {
+                    self.selected = self
+                        .scene
+                        .objects
+                        .first()
+                        .map(|object| SceneSelection::Object(object.id))
+                        .or_else(|| {
+                            self.scene
+                                .lights
+                                .first()
+                                .map(|light| SceneSelection::Light(light.id))
+                        });
+                }
+            }
+            Some(SceneSelection::Light(id)) => {
+                if self.scene.remove_light(id) {
+                    self.selected = self
+                        .scene
+                        .lights
+                        .first()
+                        .map(|light| SceneSelection::Light(light.id))
+                        .or_else(|| {
+                            self.scene
+                                .objects
+                                .first()
+                                .map(|object| SceneSelection::Object(object.id))
+                        });
+                }
+            }
+            None => {}
+        }
+    }
+
     pub fn apply_worker_event(&mut self, event: WorkerMessage) -> bool {
         match event {
             WorkerMessage::Begin {
+                mode,
                 backend_id,
                 request,
             } => {
                 self.preview = Some(PreviewBuffer::new(request.width, request.height));
-                self.status = RenderStatus::Rendering {
+                self.status = RenderStatus::Running {
+                    mode,
                     backend_id,
                     scanlines_done: 0,
                     total_scanlines: request.height,
@@ -262,8 +405,7 @@ impl GuiState {
                     .as_mut()
                     .map(|preview| preview.apply_scanline(y, &pixels))
                     .unwrap_or(false);
-
-                if let RenderStatus::Rendering {
+                if let RenderStatus::Running {
                     scanlines_done,
                     total_scanlines,
                     ..
@@ -272,11 +414,11 @@ impl GuiState {
                 {
                     *scanlines_done += 1;
                 }
-
                 preview_dirty
             }
-            WorkerMessage::End { stats } => {
+            WorkerMessage::End { mode, stats } => {
                 self.status = RenderStatus::Done(RenderDoneStats {
+                    mode,
                     backend_id: stats.backend_id.as_str().to_string(),
                     frame_index: stats.frame_index,
                     elapsed: stats.elapsed,
@@ -292,59 +434,66 @@ impl GuiState {
     }
 }
 
+fn default_object_material() -> AuthoredMaterial {
+    AuthoredMaterial::opaque(Color::new(0.7, 0.7, 0.7), 0.0, 0.35)
+}
+
+fn default_sphere_kind() -> AuthoredObjectKind {
+    AuthoredObjectKind::Sphere {
+        center: Point3::new(0.0, -0.45, -0.1),
+        radius: 0.28,
+    }
+}
+
+fn default_cuboid_kind() -> AuthoredObjectKind {
+    AuthoredObjectKind::Cuboid {
+        min: Point3::new(-0.25, -1.0, -0.25),
+        max: Point3::new(0.25, -0.35, 0.25),
+    }
+}
+
+fn default_point_light_kind() -> AuthoredLightKind {
+    AuthoredLightKind::Point {
+        position: Point3::new(0.0, 0.65, 0.0),
+        intensity: Color::new(1.0, 1.0, 1.0),
+    }
+}
+
+fn default_directional_light_kind() -> AuthoredLightKind {
+    AuthoredLightKind::Directional {
+        direction: Vector3::new(0.2, -1.0, -0.15),
+        intensity: Color::new(0.8, 0.8, 0.8),
+    }
+}
+
 fn run_render_job_with_initializer(
-    params: RenderParams,
+    job: PreparedRenderJob,
     tx: Sender<WorkerMessage>,
     initialize_gpu_fn: impl Fn() -> Result<(), String>,
 ) {
-    if params.init_gpu
+    if job.init_gpu
         && let Err(error) = initialize_gpu_fn()
     {
         let _ = tx.send(WorkerMessage::Error(error));
         return;
     }
 
-    let registry = build_registry_with_config(RuntimeRenderConfig {
-        exposure: DEFAULT_SPECTRAL_EXPOSURE,
-        cpu_threads: params.cpu_threads,
-    });
-    let provider = match build_animated_scene_provider_with_camera(
-        params.width as f32 / params.height as f32,
-        params.camera_config(),
+    let registry = build_registry_with_config(job.runtime_config);
+    let provider = StaticSceneProvider::new(job.snapshot);
+    let mut sink = ChannelFrameSink::new(tx.clone(), job.mode);
+    if let Err(error) = render_frame(
+        &registry,
+        &provider,
+        &job.backend_id,
+        &job.request,
+        &mut sink,
     ) {
-        Ok(provider) => provider,
-        Err(message) => {
-            let _ = tx.send(WorkerMessage::Error(format!(
-                "invalid camera configuration: {message}"
-            )));
-            return;
-        }
-    };
-    let backend_id = BackendId::new(params.backend_id);
-
-    let request = FrameRequest {
-        width: params.width,
-        height: params.height,
-        frame_index: 0,
-        time: 0.0,
-        samples_per_pixel: params.samples_per_pixel,
-        max_bounces: params.max_bounces,
-        path_tracing: PathTracingConfig {
-            rr_start_depth: params.rr_start_depth,
-            rr_min_survival: params.rr_min_survival,
-            indirect_clamp: params.indirect_clamp,
-            direct_lighting: params.direct_lighting,
-        },
-    };
-
-    let mut sink = ChannelFrameSink::new(tx.clone());
-    if let Err(error) = render_frame(&registry, &provider, &backend_id, &request, &mut sink) {
         let _ = tx.send(WorkerMessage::Error(error.to_string()));
     }
 }
 
-pub fn run_render_job(params: RenderParams, tx: Sender<WorkerMessage>) {
-    run_render_job_with_initializer(params, tx, || {
+pub fn run_render_job(job: PreparedRenderJob, tx: Sender<WorkerMessage>) {
+    run_render_job_with_initializer(job, tx, || {
         initialize_gpu()
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -392,21 +541,29 @@ impl CherryGuiApp {
         }
     }
 
-    fn start_render(&mut self, ctx: &egui::Context) {
-        if self.state.is_rendering() {
+    fn start_job(&mut self, ctx: &egui::Context, mode: JobMode) {
+        if self.state.is_busy() {
             return;
         }
-
-        self.state.mark_rendering_requested();
+        let job = match PreparedRenderJob::prepare(
+            mode,
+            self.state.params.clone(),
+            self.state.scene.clone(),
+        ) {
+            Ok(job) => job,
+            Err(message) => {
+                self.state.status = RenderStatus::Error(message);
+                ctx.request_repaint();
+                return;
+            }
+        };
+        self.state
+            .mark_job_requested(job.mode, job.backend_id.as_str().to_string());
         self.preview_texture = None;
         self.preview_dirty = false;
 
-        let params = self.state.params.clone();
         let (tx, rx) = mpsc::channel();
-        let handle = thread::spawn(move || {
-            run_render_job(params, tx);
-        });
-
+        let handle = thread::spawn(move || run_render_job(job, tx));
         self.worker_rx = Some(rx);
         self.worker_handle = Some(handle);
         ctx.request_repaint();
@@ -414,7 +571,6 @@ impl CherryGuiApp {
 
     fn process_worker_events(&mut self, ctx: &egui::Context) {
         let mut clear_worker = false;
-
         if let Some(rx) = &self.worker_rx {
             while let Ok(event) = rx.try_recv() {
                 let terminal_event =
@@ -432,11 +588,9 @@ impl CherryGuiApp {
             self.upload_preview_texture(ctx);
             self.preview_dirty = false;
         }
-
-        if self.state.is_rendering() {
+        if self.state.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
-
         if clear_worker {
             self.worker_rx = None;
             if let Some(handle) = self.worker_handle.take() {
@@ -450,12 +604,10 @@ impl CherryGuiApp {
         let Some(preview) = &self.state.preview else {
             return;
         };
-
         let image = egui::ColorImage::from_rgba_unmultiplied(
-            [preview.width as usize, preview.height as usize],
+            [preview.width() as usize, preview.height() as usize],
             preview.pixels(),
         );
-
         if let Some(texture) = &mut self.preview_texture {
             texture.set(image, egui::TextureOptions::LINEAR);
         } else {
@@ -466,15 +618,29 @@ impl CherryGuiApp {
 
     fn status_text(&self) -> String {
         match &self.state.status {
-            RenderStatus::Idle => "Idle. Adjust parameters, then click Render.".to_string(),
-            RenderStatus::Rendering {
+            RenderStatus::Idle => {
+                "Idle. Adjust the scene or render settings, then click Preview or Render."
+                    .to_string()
+            }
+            RenderStatus::Running {
+                mode,
                 backend_id,
                 scanlines_done,
                 total_scanlines,
-            } => format!("Rendering {backend_id}: {scanlines_done}/{total_scanlines} scanlines"),
+            } => format!(
+                "{} {}: {}/{} scanlines",
+                mode.label(),
+                backend_id,
+                scanlines_done,
+                total_scanlines
+            ),
             RenderStatus::Done(stats) => format!(
-                "Done: {} frame {} in {:.2?} (spp={})",
-                stats.backend_id, stats.frame_index, stats.elapsed, stats.samples_per_pixel
+                "{} complete: {} frame {} in {:.2?} (spp={})",
+                stats.mode.label(),
+                stats.backend_id,
+                stats.frame_index,
+                stats.elapsed,
+                stats.samples_per_pixel
             ),
             RenderStatus::Error(message) => format!("Error: {message}"),
         }
@@ -493,26 +659,248 @@ impl CherryGuiApp {
                     ui.label("Timeline: coming soon");
                 });
                 ui.separator();
-
                 if ui
-                    .add_enabled(!self.state.is_rendering(), egui::Button::new("Render"))
+                    .add_enabled(!self.state.is_busy(), egui::Button::new("Preview"))
                     .clicked()
                 {
-                    self.start_render(ctx);
+                    self.start_job(ctx, JobMode::Preview);
+                }
+                if ui
+                    .add_enabled(!self.state.is_busy(), egui::Button::new("Render"))
+                    .clicked()
+                {
+                    self.start_job(ctx, JobMode::Render);
                 }
             });
         });
     }
 
-    fn draw_controls(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("left_controls")
+    fn draw_scene_panel(&mut self, ctx: &egui::Context) {
+        #[derive(Clone, Copy)]
+        enum SceneAction {
+            AddCuboid,
+            AddSphere,
+            AddPointLight,
+            AddDirectionalLight,
+            RemoveSelected,
+        }
+
+        let busy = self.state.is_busy();
+        let mut action = None;
+        egui::SidePanel::left("scene_panel")
             .resizable(true)
-            .default_width(260.0)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.heading("Scene");
+                ui.separator();
+
+                ui.add_enabled_ui(!busy, |ui| {
+                    edit_color(ui, "Background", &mut self.state.scene.background);
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Add Cuboid").clicked() {
+                            action = Some(SceneAction::AddCuboid);
+                        }
+                        if ui.button("Add Sphere").clicked() {
+                            action = Some(SceneAction::AddSphere);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Add Point Light").clicked() {
+                            action = Some(SceneAction::AddPointLight);
+                        }
+                        if ui.button("Add Sun Light").clicked() {
+                            action = Some(SceneAction::AddDirectionalLight);
+                        }
+                    });
+
+                    ui.separator();
+                    ui.label("Objects");
+                    egui::ScrollArea::vertical()
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for object in &self.state.scene.objects {
+                                let selected =
+                                    self.state.selected == Some(SceneSelection::Object(object.id));
+                                if ui
+                                    .selectable_label(
+                                        selected,
+                                        format!("{} [{}]", object.name, object.kind_label()),
+                                    )
+                                    .clicked()
+                                {
+                                    self.state.selected = Some(SceneSelection::Object(object.id));
+                                }
+                            }
+                        });
+
+                    ui.separator();
+                    ui.label("Lights");
+                    egui::ScrollArea::vertical()
+                        .max_height(120.0)
+                        .show(ui, |ui| {
+                            for light in &self.state.scene.lights {
+                                let selected =
+                                    self.state.selected == Some(SceneSelection::Light(light.id));
+                                if ui
+                                    .selectable_label(
+                                        selected,
+                                        format!("{} [{}]", light.name, light.kind_label()),
+                                    )
+                                    .clicked()
+                                {
+                                    self.state.selected = Some(SceneSelection::Light(light.id));
+                                }
+                            }
+                        });
+
+                    ui.separator();
+                    let mut remove_selected = false;
+                    match self.state.selected {
+                        Some(SceneSelection::Object(id)) => {
+                            if let Some(object) = self.state.scene.object_mut(id) {
+                                Self::draw_object_inspector(ui, object);
+                                remove_selected = ui.button("Remove Selected").clicked();
+                            } else {
+                                self.state.selected = None;
+                            }
+                        }
+                        Some(SceneSelection::Light(id)) => {
+                            if let Some(light) = self.state.scene.light_mut(id) {
+                                Self::draw_light_inspector(ui, light);
+                                remove_selected = ui.button("Remove Selected").clicked();
+                            } else {
+                                self.state.selected = None;
+                            }
+                        }
+                        None => {
+                            ui.label("Select an object or light to edit it.");
+                        }
+                    }
+
+                    if remove_selected {
+                        action = Some(SceneAction::RemoveSelected);
+                    }
+                });
+            });
+
+        if let Some(action) = action {
+            match action {
+                SceneAction::AddCuboid => {
+                    self.state.add_object(default_cuboid_kind());
+                }
+                SceneAction::AddSphere => {
+                    self.state.add_object(default_sphere_kind());
+                }
+                SceneAction::AddPointLight => {
+                    self.state.add_light(default_point_light_kind());
+                }
+                SceneAction::AddDirectionalLight => {
+                    self.state.add_light(default_directional_light_kind());
+                }
+                SceneAction::RemoveSelected => self.state.remove_selected(),
+            }
+        }
+    }
+
+    fn draw_object_inspector(ui: &mut egui::Ui, object: &mut AuthoredObject) {
+        ui.heading("Object");
+        ui.text_edit_singleline(&mut object.name);
+        ui.label(object.kind_label());
+
+        match &mut object.kind {
+            AuthoredObjectKind::Cuboid { min, max } => {
+                edit_point3(ui, "Min", min);
+                edit_point3(ui, "Max", max);
+            }
+            AuthoredObjectKind::Sphere { center, radius } => {
+                edit_point3(ui, "Center", center);
+                ui.horizontal(|ui| {
+                    ui.label("Radius");
+                    ui.add(
+                        egui::DragValue::new(radius)
+                            .range(0.001..=1000.0)
+                            .speed(0.01),
+                    );
+                });
+            }
+        }
+
+        ui.separator();
+        Self::draw_material_editor(ui, &mut object.material);
+    }
+
+    fn draw_light_inspector(ui: &mut egui::Ui, light: &mut AuthoredLight) {
+        ui.heading("Light");
+        ui.text_edit_singleline(&mut light.name);
+        ui.label(light.kind_label());
+
+        match &mut light.kind {
+            AuthoredLightKind::Point {
+                position,
+                intensity,
+            } => {
+                edit_point3(ui, "Position", position);
+                edit_color(ui, "Intensity", intensity);
+            }
+            AuthoredLightKind::Directional {
+                direction,
+                intensity,
+            } => {
+                edit_vector3(ui, "Direction", direction);
+                edit_color(ui, "Intensity", intensity);
+            }
+        }
+    }
+
+    fn draw_material_editor(ui: &mut egui::Ui, material: &mut AuthoredMaterial) {
+        ui.heading("Material");
+        edit_color(ui, "Base Color", &mut material.base_color);
+        edit_color(ui, "Emissive", &mut material.emissive);
+        ui.horizontal(|ui| {
+            ui.label("Metallic");
+            ui.add(
+                egui::DragValue::new(&mut material.metallic)
+                    .range(0.0..=1.0)
+                    .speed(0.01),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Roughness");
+            ui.add(
+                egui::DragValue::new(&mut material.roughness)
+                    .range(0.0..=1.0)
+                    .speed(0.01),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Transmission");
+            ui.add(
+                egui::DragValue::new(&mut material.transmission)
+                    .range(0.0..=1.0)
+                    .speed(0.01),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("IOR");
+            ui.add(
+                egui::DragValue::new(&mut material.ior)
+                    .range(1.0..=4.0)
+                    .speed(0.01),
+            );
+        });
+    }
+
+    fn draw_controls(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::right("right_controls")
+            .resizable(true)
+            .default_width(280.0)
             .show(ctx, |ui| {
                 ui.heading("Render Controls");
                 ui.separator();
 
-                ui.add_enabled_ui(!self.state.is_rendering(), |ui| {
+                ui.add_enabled_ui(!self.state.is_busy(), |ui| {
                     egui::ComboBox::from_label("Backend")
                         .selected_text(self.state.params.backend_id.clone())
                         .show_ui(ui, |ui| {
@@ -549,51 +937,33 @@ impl CherryGuiApp {
 
                     ui.separator();
                     ui.label("Camera");
-                    ui.horizontal(|ui| {
-                        ui.label("Look From");
-                        ui.add(
-                            egui::DragValue::new(&mut self.state.params.camera_look_from_x)
-                                .speed(0.01),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut self.state.params.camera_look_from_y)
-                                .speed(0.01),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut self.state.params.camera_look_from_z)
-                                .speed(0.01),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Look At");
-                        ui.add(
-                            egui::DragValue::new(&mut self.state.params.camera_look_at_x)
-                                .speed(0.01),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut self.state.params.camera_look_at_y)
-                                .speed(0.01),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut self.state.params.camera_look_at_z)
-                                .speed(0.01),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("View Up");
-                        ui.add(
-                            egui::DragValue::new(&mut self.state.params.camera_view_up_x)
-                                .speed(0.01),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut self.state.params.camera_view_up_y)
-                                .speed(0.01),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut self.state.params.camera_view_up_z)
-                                .speed(0.01),
-                        );
-                    });
+                    drag_f32_triplet(
+                        ui,
+                        "Look From",
+                        [
+                            &mut self.state.params.camera_look_from_x,
+                            &mut self.state.params.camera_look_from_y,
+                            &mut self.state.params.camera_look_from_z,
+                        ],
+                    );
+                    drag_f32_triplet(
+                        ui,
+                        "Look At",
+                        [
+                            &mut self.state.params.camera_look_at_x,
+                            &mut self.state.params.camera_look_at_y,
+                            &mut self.state.params.camera_look_at_z,
+                        ],
+                    );
+                    drag_f32_triplet(
+                        ui,
+                        "View Up",
+                        [
+                            &mut self.state.params.camera_view_up_x,
+                            &mut self.state.params.camera_view_up_y,
+                            &mut self.state.params.camera_view_up_z,
+                        ],
+                    );
                     ui.horizontal(|ui| {
                         ui.label("FOV");
                         ui.add(
@@ -693,12 +1063,11 @@ impl CherryGuiApp {
                 });
 
                 ui.separator();
-                ui.heading("Animation");
-                ui.label("Frame sequencing and playback are reserved for a future milestone.");
-
-                ui.separator();
-                ui.heading("Menus & Tools");
-                ui.label("Advanced panels, scene controls, and export tools are coming soon.");
+                ui.heading("Preview Notes");
+                ui.label("Preview uses raster.simple for fast geometry and base-color feedback.");
+                ui.label(
+                    "Authored lights, shadows, and higher-fidelity material behavior still require Render.",
+                );
             });
     }
 
@@ -709,11 +1078,10 @@ impl CherryGuiApp {
 
             let Some(texture) = &self.preview_texture else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("No preview yet. Click Render to start.");
+                    ui.label("No preview yet. Click Preview or Render to start.");
                 });
                 return;
             };
-
             let Some(preview) = &self.state.preview else {
                 ui.centered_and_justified(|ui| {
                     ui.label("Preparing preview buffer...");
@@ -721,7 +1089,7 @@ impl CherryGuiApp {
                 return;
             };
 
-            let source = egui::vec2(preview.width as f32, preview.height as f32);
+            let source = egui::vec2(preview.width() as f32, preview.height() as f32);
             let available = ui.available_size();
             let scale = (available.x / source.x)
                 .min(available.y / source.y)
@@ -745,10 +1113,48 @@ impl eframe::App for CherryGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_events(ctx);
         self.draw_top_bar(ctx);
+        self.draw_scene_panel(ctx);
         self.draw_controls(ctx);
         self.draw_preview(ctx);
         self.draw_status_bar(ctx);
     }
+}
+
+fn edit_point3(ui: &mut egui::Ui, label: &str, point: &mut Point3<f32>) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(&mut point.x).speed(0.01));
+        ui.add(egui::DragValue::new(&mut point.y).speed(0.01));
+        ui.add(egui::DragValue::new(&mut point.z).speed(0.01));
+    });
+}
+
+fn edit_vector3(ui: &mut egui::Ui, label: &str, vector: &mut Vector3<f32>) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(&mut vector.x).speed(0.01));
+        ui.add(egui::DragValue::new(&mut vector.y).speed(0.01));
+        ui.add(egui::DragValue::new(&mut vector.z).speed(0.01));
+    });
+}
+
+fn edit_color(ui: &mut egui::Ui, label: &str, color: &mut Color) {
+    let mut rgb = [color.x, color.y, color.z];
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui.color_edit_button_rgb(&mut rgb).changed() {
+            *color = Color::new(rgb[0], rgb[1], rgb[2]);
+        }
+    });
+}
+
+fn drag_f32_triplet(ui: &mut egui::Ui, label: &str, values: [&mut f32; 3]) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        for value in values {
+            ui.add(egui::DragValue::new(value).speed(0.01));
+        }
+    });
 }
 
 pub fn run() -> eframe::Result<()> {
@@ -773,10 +1179,14 @@ mod tests {
 
     use cherry_core::{Color, FrameRequest};
     use cherry_render::{BackendId, RenderStats};
+    use nalgebra::Point3;
 
     use super::{
-        GuiState, PreviewBuffer, RenderDoneStats, RenderParams, RenderStatus, WorkerMessage,
+        GuiState, JobMode, PreparedRenderJob, PreviewBuffer, RenderDoneStats, RenderParams,
+        RenderStatus, WorkerMessage, default_directional_light_kind, default_sphere_kind,
+        supports_path_tracing_controls,
     };
+    use crate::scene_editor::{AuthoredObjectKind, SceneSelection};
 
     #[test]
     fn preview_buffer_writes_scanline_at_expected_offset() {
@@ -799,12 +1209,13 @@ mod tests {
     }
 
     #[test]
-    fn gui_state_transitions_idle_rendering_done() {
+    fn gui_state_transitions_idle_running_done() {
         let mut state = GuiState::new(RenderParams::default());
-        state.mark_rendering_requested();
-        assert!(state.is_rendering());
+        state.mark_job_requested(JobMode::Render, "raster.simple".to_string());
+        assert!(state.is_busy());
 
         state.apply_worker_event(WorkerMessage::Begin {
+            mode: JobMode::Render,
             backend_id: "raster.simple".to_string(),
             request: FrameRequest {
                 width: 4,
@@ -816,13 +1227,12 @@ mod tests {
                 path_tracing: Default::default(),
             },
         });
-
         state.apply_worker_event(WorkerMessage::Scanline {
             y: 0,
             pixels: vec![Color::new(0.2, 0.3, 0.4); 4],
         });
-
         state.apply_worker_event(WorkerMessage::End {
+            mode: JobMode::Render,
             stats: RenderStats {
                 backend_id: BackendId::new("raster.simple"),
                 frame_index: 0,
@@ -834,18 +1244,21 @@ mod tests {
         assert_eq!(
             state.status,
             RenderStatus::Done(RenderDoneStats {
+                mode: JobMode::Render,
                 backend_id: "raster.simple".to_string(),
                 frame_index: 0,
                 elapsed: Duration::from_millis(12),
                 samples_per_pixel: 1,
             })
         );
+        assert!(!state.is_busy());
     }
 
     #[test]
     fn event_flow_updates_scanline_progress() {
         let mut state = GuiState::new(RenderParams::default());
         state.apply_worker_event(WorkerMessage::Begin {
+            mode: JobMode::Preview,
             backend_id: "ray.normal".to_string(),
             request: FrameRequest {
                 width: 3,
@@ -857,48 +1270,26 @@ mod tests {
                 path_tracing: Default::default(),
             },
         });
-
         state.apply_worker_event(WorkerMessage::Scanline {
             y: 0,
             pixels: vec![Color::new(0.1, 0.1, 0.1); 3],
         });
 
         match state.status {
-            RenderStatus::Rendering { scanlines_done, .. } => assert_eq!(scanlines_done, 1),
-            _ => panic!("expected rendering status"),
+            RenderStatus::Running { scanlines_done, .. } => assert_eq!(scanlines_done, 1),
+            _ => panic!("expected running status"),
         }
     }
 
     #[test]
     fn worker_job_emits_begin_scanline_end_without_panic() {
-        let params = RenderParams {
-            backend_id: "raster.simple".to_string(),
-            width: 16,
-            height: 16,
-            samples_per_pixel: 1,
-            max_bounces: 1,
-            rr_start_depth: 3,
-            rr_min_survival: 0.05,
-            indirect_clamp: 10.0,
-            direct_lighting: true,
-            cpu_threads: None,
-            init_gpu: false,
-            camera_look_from_x: 0.0,
-            camera_look_from_y: 0.0,
-            camera_look_from_z: 2.6,
-            camera_look_at_x: 0.0,
-            camera_look_at_y: -0.1,
-            camera_look_at_z: -0.25,
-            camera_view_up_x: 0.0,
-            camera_view_up_y: 1.0,
-            camera_view_up_z: 0.0,
-            camera_fov_degrees: 38.0,
-            camera_aperture: 0.0,
-            camera_focal_distance: None,
-        };
+        let state = GuiState::new(RenderParams::default());
+        let job =
+            PreparedRenderJob::prepare(JobMode::Preview, state.params.clone(), state.scene.clone())
+                .expect("preview job should prepare");
 
         let (tx, rx) = mpsc::channel();
-        super::run_render_job(params.clone(), tx);
+        super::run_render_job(job.clone(), tx);
 
         let mut labels = Vec::new();
         loop {
@@ -921,7 +1312,7 @@ mod tests {
         assert_eq!(labels.last(), Some(&"end"));
         assert_eq!(
             labels.iter().filter(|label| **label == "scanline").count(),
-            params.height as usize
+            job.request.height as usize
         );
     }
 
@@ -940,34 +1331,16 @@ mod tests {
 
     #[test]
     fn worker_job_reports_error_when_gpu_init_fails() {
-        let params = RenderParams {
-            backend_id: "raster.simple".to_string(),
-            width: 8,
-            height: 8,
-            samples_per_pixel: 1,
-            max_bounces: 1,
-            rr_start_depth: 3,
-            rr_min_survival: 0.05,
-            indirect_clamp: 10.0,
-            direct_lighting: true,
-            cpu_threads: None,
+        let state = GuiState::new(RenderParams {
             init_gpu: true,
-            camera_look_from_x: 0.0,
-            camera_look_from_y: 0.0,
-            camera_look_from_z: 2.6,
-            camera_look_at_x: 0.0,
-            camera_look_at_y: -0.1,
-            camera_look_at_z: -0.25,
-            camera_view_up_x: 0.0,
-            camera_view_up_y: 1.0,
-            camera_view_up_z: 0.0,
-            camera_fov_degrees: 38.0,
-            camera_aperture: 0.0,
-            camera_focal_distance: None,
-        };
+            ..RenderParams::default()
+        });
+        let job =
+            PreparedRenderJob::prepare(JobMode::Render, state.params.clone(), state.scene.clone())
+                .expect("render job should prepare");
 
         let (tx, rx) = mpsc::channel();
-        super::run_render_job_with_initializer(params, tx, || {
+        super::run_render_job_with_initializer(job, tx, || {
             Err("gpu init failed for test".to_string())
         });
 
@@ -982,16 +1355,16 @@ mod tests {
 
     #[test]
     fn path_tracing_control_visibility_is_backend_gated() {
-        assert!(super::supports_path_tracing_controls("ray.montecarlo"));
-        assert!(super::supports_path_tracing_controls("ray.spectral"));
-        assert!(!super::supports_path_tracing_controls("ray.normal"));
-        assert!(!super::supports_path_tracing_controls("raster.simple"));
+        assert!(supports_path_tracing_controls("ray.montecarlo"));
+        assert!(supports_path_tracing_controls("ray.spectral"));
+        assert!(!supports_path_tracing_controls("ray.normal"));
+        assert!(!supports_path_tracing_controls("raster.simple"));
     }
 
     #[test]
     fn worker_job_propagates_path_tracing_settings_to_request() {
         let params = RenderParams {
-            backend_id: "raster.simple".to_string(),
+            backend_id: "ray.spectral".to_string(),
             width: 8,
             height: 8,
             samples_per_pixel: 1,
@@ -1000,24 +1373,13 @@ mod tests {
             rr_min_survival: 0.22,
             indirect_clamp: 2.75,
             direct_lighting: false,
-            cpu_threads: None,
-            init_gpu: false,
-            camera_look_from_x: 0.0,
-            camera_look_from_y: 0.0,
-            camera_look_from_z: 2.6,
-            camera_look_at_x: 0.0,
-            camera_look_at_y: -0.1,
-            camera_look_at_z: -0.25,
-            camera_view_up_x: 0.0,
-            camera_view_up_y: 1.0,
-            camera_view_up_z: 0.0,
-            camera_fov_degrees: 38.0,
-            camera_aperture: 0.0,
-            camera_focal_distance: None,
+            ..RenderParams::default()
         };
+        let state = GuiState::new(params.clone());
+        let job = PreparedRenderJob::prepare(JobMode::Render, params, state.scene.clone()).unwrap();
 
         let (tx, rx) = mpsc::channel();
-        super::run_render_job(params, tx);
+        super::run_render_job(job, tx);
 
         let begin_request = loop {
             match rx
@@ -1043,5 +1405,122 @@ mod tests {
         params.camera_focal_distance = Some(1.75);
         let config = params.camera_config();
         assert_eq!(config.focal_distance, Some(1.75));
+    }
+
+    #[test]
+    fn gui_state_can_add_and_remove_selected_object() {
+        let mut state = GuiState::new(RenderParams::default());
+        let original_count = state.scene.objects.len();
+
+        let added_id = state.add_object(default_sphere_kind());
+
+        assert_eq!(state.selected, Some(SceneSelection::Object(added_id)));
+        assert_eq!(state.scene.objects.len(), original_count + 1);
+
+        state.remove_selected();
+
+        assert_eq!(state.scene.objects.len(), original_count);
+    }
+
+    #[test]
+    fn gui_state_can_add_and_remove_selected_light() {
+        let mut state = GuiState::new(RenderParams::default());
+        let original_count = state.scene.lights.len();
+
+        let added_id = state.add_light(default_directional_light_kind());
+
+        assert_eq!(state.selected, Some(SceneSelection::Light(added_id)));
+        assert_eq!(state.scene.lights.len(), original_count + 1);
+
+        state.remove_selected();
+
+        assert_eq!(state.scene.lights.len(), original_count);
+    }
+
+    #[test]
+    fn preview_job_forces_raster_backend() {
+        let state = GuiState::new(RenderParams {
+            backend_id: "ray.spectral".to_string(),
+            ..RenderParams::default()
+        });
+
+        let job =
+            PreparedRenderJob::prepare(JobMode::Preview, state.params.clone(), state.scene.clone())
+                .expect("preview job should prepare");
+
+        assert_eq!(job.backend_id.as_str(), "raster.simple");
+    }
+
+    #[test]
+    fn render_job_uses_selected_backend() {
+        let state = GuiState::new(RenderParams {
+            backend_id: "ray.spectral".to_string(),
+            ..RenderParams::default()
+        });
+
+        let job =
+            PreparedRenderJob::prepare(JobMode::Render, state.params.clone(), state.scene.clone())
+                .expect("render job should prepare");
+
+        assert_eq!(job.backend_id.as_str(), "ray.spectral");
+    }
+
+    #[test]
+    fn prepare_job_rejects_invalid_scene() {
+        let mut state = GuiState::new(RenderParams::default());
+        state.scene.objects.clear();
+        let added_id = state.add_object(AuthoredObjectKind::Sphere {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 0.0,
+        });
+        assert_eq!(state.selected, Some(SceneSelection::Object(added_id)));
+
+        let err =
+            PreparedRenderJob::prepare(JobMode::Render, state.params.clone(), state.scene.clone())
+                .err()
+                .expect("invalid scene should fail job preparation");
+
+        assert!(err.contains("radius"));
+    }
+
+    #[test]
+    fn preview_and_render_statuses_are_distinct() {
+        let mut state = GuiState::new(RenderParams::default());
+        state.mark_job_requested(JobMode::Preview, "raster.simple".to_string());
+        assert!(matches!(
+            state.status,
+            RenderStatus::Running {
+                mode: JobMode::Preview,
+                ..
+            }
+        ));
+        assert!(state.is_busy());
+
+        state.apply_worker_event(WorkerMessage::End {
+            mode: JobMode::Preview,
+            stats: RenderStats {
+                backend_id: BackendId::new("raster.simple"),
+                frame_index: 0,
+                elapsed: Duration::from_millis(12),
+                samples_per_pixel: 1,
+            },
+        });
+
+        assert!(matches!(
+            state.status,
+            RenderStatus::Done(RenderDoneStats {
+                mode: JobMode::Preview,
+                ..
+            })
+        ));
+
+        state.mark_job_requested(JobMode::Render, "ray.normal".to_string());
+        assert!(matches!(
+            state.status,
+            RenderStatus::Running {
+                mode: JobMode::Render,
+                ..
+            }
+        ));
     }
 }

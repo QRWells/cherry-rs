@@ -37,11 +37,18 @@ cargo run -p cherry-app -- --backend=raster.simple --frames=24
 
 The CLI now shows a live per-frame progress bar while rendering.
 
-Launch GUI preview app (single-frame realtime scanline preview, render controls, extension-ready layout shell):
+Launch GUI preview app with a scene editor, draft raster preview, and manual final render:
 
 ```bash
 cargo run -p cherry-gui
 ```
+
+GUI workflow notes:
+
+- `Preview` always uses `raster.simple` for fast draft feedback.
+- `Render` uses the selected backend from the render controls panel.
+- The scene panel supports adding/removing cuboids, spheres, point lights, and directional lights, plus editing `GltfMrBsdf` material inputs.
+- Raster preview is intentionally lightweight: it shows geometry, base color, and background quickly, but does not yet reflect authored lighting, shadows, or higher-fidelity material behavior.
 
 Use `--spp` (or `--samples-per-pixel`) to control path tracing sampling:
 

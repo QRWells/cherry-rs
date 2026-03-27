@@ -11,7 +11,7 @@ This file defines maintenance rules for `cherry-rs` so future changes preserve a
   - `cherry-backend-raster`: raster backend implementations.
   - `cherry-backend-ray`: ray backend implementations and accel/tracer strategy implementations.
   - `cherry-app`: thin CLI runner and shared app-level runtime setup (`build_registry`, `build_animated_scene_provider`, output naming).
-  - `cherry-gui`: thin native GUI runner for interactive preview (`eframe` + `egui`) built on shared app-level runtime setup.
+  - `cherry-gui`: thin native GUI runner for interactive preview and in-memory scene editing (`eframe` + `egui`) built on shared app-level runtime setup.
 - Do not reintroduce a monolithic root `src/` application.
 
 ## 2) Dependency Direction (Must Stay Acyclic)
@@ -65,9 +65,11 @@ When changing contracts:
 - Keep `cherry-gui` thin. It should orchestrate UI + event plumbing, not duplicate renderer internals.
 - GUI v1 invariants:
   - Single-frame preview mode (no sequence playback yet).
-  - Manual render trigger (`Render` button), not auto-start.
-  - Single active render at a time; controls disabled while rendering.
+  - Manual preview/render triggers (`Preview` and `Render` buttons), not auto-start.
+  - Single active preview/render job at a time; scene and render controls disabled while a job is running.
   - Progressive preview updates are driven by `FrameSink` scanline events.
+  - Scene editing is in-memory only in v1; edits apply to the next explicit `Preview` or `Render`.
+  - `Preview` uses lightweight raster draft feedback; final fidelity remains a manual `Render` using the selected backend.
   - Preview-only output (no export/save pipeline required in v1).
 - Output naming for animation frames should remain deterministic and index-based.
 - Video encoding is out of scope for renderer core; treat it as a separate layer/tool.
