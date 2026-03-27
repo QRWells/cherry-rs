@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use cherry_backend_ray::{RayAccel, RayBackend, SpectralRayBackend, TraceMethod};
 use cherry_core::{
-    Camera, Color, Cuboid, DirectionalSpectralLight, FrameRequest, GltfMrBsdf, PathTracingConfig,
-    PointSpectralLight, SceneSnapshot, Sphere, rgb_to_emission_spectrum,
+    Camera, Color, Cuboid, DirectionalSpectralLight, FrameRequest, GltfMrBsdf, Hit,
+    PathTracingConfig, PointSpectralLight, Primitive, Ray, SceneSnapshot, Sphere,
+    rgb_to_emission_spectrum,
 };
 use cherry_render::{NoopFrameSink, RenderBackend};
 use nalgebra::{Point3, Vector2, Vector3};
@@ -119,6 +120,70 @@ fn high_energy_indirect_scene() -> SceneSnapshot {
         Point3::new(0.0, 0.0, 0.0),
         0.9,
         white,
+    )));
+    scene
+}
+
+fn hdr_background_scene() -> SceneSnapshot {
+    SceneSnapshot::new(test_camera()).with_background(Color::new(12.0, 8.0, 4.0))
+}
+
+struct TransmissionPlane {
+    material: Arc<dyn cherry_core::Bsdf>,
+}
+
+impl TransmissionPlane {
+    fn new(material: Arc<dyn cherry_core::Bsdf>) -> Self {
+        Self { material }
+    }
+}
+
+impl Primitive for TransmissionPlane {
+    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+        if ray.dir.x.abs() <= 1e-6 {
+            return None;
+        }
+
+        let distance = -ray.origin.x / ray.dir.x;
+        if distance <= 0.01 {
+            return None;
+        }
+
+        let point = ray.at(distance);
+        if point.y.abs() > 0.75 || point.z.abs() > 0.75 {
+            return None;
+        }
+
+        Some(Hit {
+            point,
+            normal: Vector3::new(-1.0, 0.0, 0.0),
+            distance,
+            material: Arc::clone(&self.material),
+        })
+    }
+}
+
+fn transmission_plane_scene() -> SceneSnapshot {
+    let camera = Camera::new(
+        Point3::new(-1.2, 0.0, 0.0),
+        Point3::new(0.0, 0.0, 0.0),
+        Vector3::y_axis().into_inner(),
+        40.0,
+        1.0,
+        0.0,
+        1.0,
+    );
+    let material = Arc::new(GltfMrBsdf::transmissive(
+        Color::new(0.95, 0.97, 1.0),
+        0.1,
+        1.0,
+        1.5,
+    ));
+    let mut scene = SceneSnapshot::new(camera).with_background(Color::new(0.0, 0.0, 0.0));
+    scene.add_primitive(Arc::new(TransmissionPlane::new(material)));
+    scene.add_light(Arc::new(PointSpectralLight::from_rgb(
+        Point3::new(2.0, 0.0, 0.0),
+        Color::new(24.0, 24.0, 24.0),
     )));
     scene
 }
@@ -402,5 +467,84 @@ fn spectral_backend_honors_direct_lighting_toggle() {
     assert!(
         on > off + 0.01,
         "expected spectral direct-lighting toggle to affect luminance, on={on}, off={off}"
+    );
+}
+
+#[test]
+fn monte_carlo_transmission_direct_lighting_is_not_black() {
+    let scene = transmission_plane_scene();
+    let with_direct_request = FrameRequest {
+        width: 16,
+        height: 16,
+        frame_index: 0,
+        time: 0.0,
+        samples_per_pixel: 1,
+        max_bounces: 1,
+        path_tracing: PathTracingConfig {
+            direct_lighting: true,
+            ..PathTracingConfig::default()
+        },
+    };
+    let without_direct_request = FrameRequest {
+        path_tracing: PathTracingConfig {
+            direct_lighting: false,
+            ..with_direct_request.path_tracing.clone()
+        },
+        ..with_direct_request.clone()
+    };
+
+    let backend = RayBackend::with_method(TraceMethod::MonteCarlo);
+    let with_direct = backend.render_frame_typed(&scene, &with_direct_request);
+    let without_direct = backend.render_frame_typed(&scene, &without_direct_request);
+
+    let on = luminance(with_direct.scanlines[8].pixels[8]);
+    let off = luminance(without_direct.scanlines[8].pixels[8]);
+    assert!(
+        on > off + 0.01 && on > 0.01,
+        "expected transmissive direct lighting to contribute, on={on}, off={off}"
+    );
+}
+
+#[test]
+fn monte_carlo_exposure_maps_hdr_and_controls_luminance() {
+    let scene = hdr_background_scene();
+    let request = FrameRequest {
+        width: 8,
+        height: 8,
+        frame_index: 0,
+        time: 0.0,
+        samples_per_pixel: 1,
+        max_bounces: 1,
+        path_tracing: PathTracingConfig {
+            direct_lighting: false,
+            ..PathTracingConfig::default()
+        },
+    };
+
+    let low = RayBackend::monte_carlo_with_exposure(0.2).render_frame_typed(&scene, &request);
+    let high = RayBackend::monte_carlo_with_exposure(1.0).render_frame_typed(&scene, &request);
+    let low_center = low.scanlines[4].pixels[4];
+    let high_center = high.scanlines[4].pixels[4];
+
+    for (label, color) in [("low", low_center), ("high", high_center)] {
+        assert!(
+            color.x.is_finite() && color.y.is_finite() && color.z.is_finite(),
+            "expected finite color for {label} exposure: {:?}",
+            color
+        );
+        assert!(
+            (0.0..=1.0).contains(&color.x)
+                && (0.0..=1.0).contains(&color.y)
+                && (0.0..=1.0).contains(&color.z),
+            "expected tone-mapped display color range [0,1] for {label} exposure: {:?}",
+            color
+        );
+    }
+
+    let low_luma = luminance(low_center);
+    let high_luma = luminance(high_center);
+    assert!(
+        high_luma > low_luma + 0.01,
+        "expected higher exposure to increase luminance, low={low_luma}, high={high_luma}"
     );
 }

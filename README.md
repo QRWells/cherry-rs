@@ -59,7 +59,8 @@ cargo run -p cherry-app -- --backend=ray.montecarlo --spp=8 --cpu-threads=8 --fr
 cargo run -p cherry-app -- --backend=ray.montecarlo --spp=8 --rr-start-depth=3 --rr-min-survival=0.05 --indirect-clamp=10 --direct-lighting=true --frames=1
 ```
 
-Use the spectral backend (hero wavelength sampling, CIE XYZ mapping, exposure + Reinhard):
+Use `--exposure` to control display mapping (Reinhard) for both `ray.montecarlo` and `ray.spectral`.
+Example with the spectral backend (hero wavelength sampling, CIE XYZ mapping):
 
 ```bash
 cargo run -p cherry-app -- --backend=ray.spectral --spp=8 --exposure=1.25 --frames=1

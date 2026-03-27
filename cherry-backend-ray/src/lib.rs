@@ -34,6 +34,7 @@ pub struct RayBackend {
     metadata: BackendMetadata,
     tracer: Arc<dyn Tracer>,
     accel: Arc<dyn Accel>,
+    exposure: Option<f32>,
     cpu_threads: Option<usize>,
 }
 
@@ -224,15 +225,27 @@ impl RayBackend {
             },
             tracer: Arc::new(NormalTracer),
             accel: Arc::new(BruteForceAccel),
+            exposure: None,
             cpu_threads,
         }
     }
 
     pub fn monte_carlo() -> Self {
-        Self::monte_carlo_with_threads(None)
+        Self::monte_carlo_with_exposure_and_threads(1.0, None)
+    }
+
+    pub fn monte_carlo_with_exposure(exposure: f32) -> Self {
+        Self::monte_carlo_with_exposure_and_threads(exposure, None)
     }
 
     pub fn monte_carlo_with_threads(cpu_threads: Option<usize>) -> Self {
+        Self::monte_carlo_with_exposure_and_threads(1.0, cpu_threads)
+    }
+
+    pub fn monte_carlo_with_exposure_and_threads(
+        exposure: f32,
+        cpu_threads: Option<usize>,
+    ) -> Self {
         Self {
             metadata: BackendMetadata {
                 id: BackendId::new(RAY_MONTE_CARLO_BACKEND_ID),
@@ -244,6 +257,7 @@ impl RayBackend {
             },
             tracer: Arc::new(MonteCarloTracer),
             accel: Arc::new(BruteForceAccel),
+            exposure: Some(exposure),
             cpu_threads,
         }
     }
@@ -266,7 +280,11 @@ impl RayBackend {
                 .trace(scene, self.accel.as_ref(), &ray, request, 0, seed);
         }
 
-        sum / request.samples_per_pixel.max(1) as f32
+        let linear_rgb = sum / request.samples_per_pixel.max(1) as f32;
+        match self.exposure {
+            Some(exposure) => apply_exposure_reinhard(linear_rgb, exposure),
+            None => linear_rgb,
+        }
     }
 }
 
@@ -333,7 +351,12 @@ pub fn register_backends_with_exposure_and_threads(
     );
     registry.register_factory(
         BackendId::new(RAY_MONTE_CARLO_BACKEND_ID),
-        Arc::new(move || Box::new(RayBackend::monte_carlo_with_threads(cpu_threads))),
+        Arc::new(move || {
+            Box::new(RayBackend::monte_carlo_with_exposure_and_threads(
+                exposure,
+                cpu_threads,
+            ))
+        }),
     );
     registry.register_factory(
         BackendId::new(RAY_SPECTRAL_BACKEND_ID),

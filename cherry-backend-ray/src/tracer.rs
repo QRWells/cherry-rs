@@ -196,8 +196,8 @@ fn estimate_direct_lighting(
             continue;
         };
 
-        let cosine = normal.dot(&direction_to_light).max(0.0);
-        if cosine <= 0.0 {
+        let cosine = normal.dot(&direction_to_light).abs();
+        if cosine <= EPSILON {
             continue;
         }
 
