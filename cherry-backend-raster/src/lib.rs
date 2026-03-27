@@ -1,43 +1,41 @@
+mod config;
+mod lighting;
+mod pipeline;
+
 use std::{sync::Arc, time::Instant};
 
-use cherry_core::{Color, FrameRequest, SceneSnapshot};
+use cherry_core::{Color, FrameRequest, SceneSnapshot, apply_exposure_reinhard};
 use cherry_render::{
     BackendCapabilities, BackendId, BackendMetadata, BackendRegistry, RenderBackend, RenderStats,
     TypedScanline,
 };
-use nalgebra::{Vector2, Vector3};
+use nalgebra::Vector2;
+use pipeline::RasterPipeline;
 use rayon::prelude::*;
 
+pub use config::RasterBackendConfig;
+
 pub const RASTER_BACKEND_ID: &str = "raster.simple";
-const PREVIEW_AMBIENT: f32 = 0.2;
 
 pub struct RasterBackend {
-    cpu_threads: Option<usize>,
+    config: RasterBackendConfig,
 }
 
 impl RasterBackend {
     pub fn new() -> Self {
-        Self::with_threads(None)
+        Self::with_config(RasterBackendConfig::default())
     }
 
     pub fn with_threads(cpu_threads: Option<usize>) -> Self {
-        Self { cpu_threads }
+        Self::with_config(RasterBackendConfig {
+            cpu_threads,
+            ..RasterBackendConfig::default()
+        })
     }
 
-    fn shade_pixel(scene: &SceneSnapshot, uv: Vector2<f32>) -> Color {
-        let ray = scene.camera.generate_ray(uv);
-        match scene.intersect(&ray) {
-            Some(hit) => preview_diffuse(hit.normal, hit.material.preview_base_color()),
-            None => scene.background,
-        }
+    pub fn with_config(config: RasterBackendConfig) -> Self {
+        Self { config }
     }
-}
-
-fn preview_diffuse(normal: Vector3<f32>, albedo: Color) -> Color {
-    let key_light_dir = Vector3::new(-0.4, 0.8, 0.45).normalize();
-    let diffuse = normal.dot(&key_light_dir).max(0.0);
-    let shade = PREVIEW_AMBIENT + (1.0 - PREVIEW_AMBIENT) * diffuse;
-    albedo * shade
 }
 
 impl Default for RasterBackend {
@@ -67,12 +65,13 @@ impl RenderBackend for RasterBackend {
         emit_scanline: &mut dyn FnMut(TypedScanline<Self::Pixel>),
     ) -> RenderStats {
         let start = Instant::now();
-        let configured_pool = self.cpu_threads.and_then(|threads| {
+        let configured_pool = self.config.cpu_threads.and_then(|threads| {
             rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .build()
                 .ok()
         });
+        let pipeline = RasterPipeline::new(scene, request, self.config);
 
         for y in 0..request.height {
             let compute_scanline = || {
@@ -83,7 +82,7 @@ impl RenderBackend for RasterBackend {
                             (x as f32 + 0.5) / request.width as f32,
                             (y as f32 + 0.5) / request.height as f32,
                         );
-                        Self::shade_pixel(scene, uv)
+                        apply_exposure_reinhard(pipeline.shade_pixel(uv), self.config.exposure)
                     })
                     .collect::<Vec<_>>()
             };
@@ -105,12 +104,22 @@ impl RenderBackend for RasterBackend {
 }
 
 pub fn register_backends(registry: &mut BackendRegistry) {
-    register_backends_with_threads(registry, None);
+    register_backends_with_config(registry, RasterBackendConfig::default());
 }
 
 pub fn register_backends_with_threads(registry: &mut BackendRegistry, cpu_threads: Option<usize>) {
+    register_backends_with_config(
+        registry,
+        RasterBackendConfig {
+            cpu_threads,
+            ..RasterBackendConfig::default()
+        },
+    );
+}
+
+pub fn register_backends_with_config(registry: &mut BackendRegistry, config: RasterBackendConfig) {
     registry.register_factory(
         BackendId::new(RASTER_BACKEND_ID),
-        Arc::new(move || Box::new(RasterBackend::with_threads(cpu_threads))),
+        Arc::new(move || Box::new(RasterBackend::with_config(config))),
     );
 }

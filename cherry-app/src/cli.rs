@@ -60,6 +60,9 @@ pub struct Cli {
     )]
     pub exposure: f32,
 
+    #[arg(long, default_value_t = 1.0, value_parser = clap::value_parser!(f32))]
+    pub raster_exposure: f32,
+
     #[arg(long, value_parser = parse_cpu_threads)]
     pub cpu_threads: Option<usize>,
 
@@ -240,6 +243,7 @@ mod tests {
         assert!((cli.indirect_clamp - 10.0).abs() < f32::EPSILON);
         assert!(cli.direct_lighting);
         assert_eq!(cli.exposure, 0.2);
+        assert_eq!(cli.raster_exposure, 1.0);
         assert!(cli.cpu_threads.is_none());
         assert!(!cli.init_gpu);
         assert_eq!(cli.output_dir.to_string_lossy(), "output");
@@ -270,6 +274,12 @@ mod tests {
     fn exposure_parses() {
         let cli = Cli::parse_from(["cherry-app", "--exposure=1.75"]);
         assert!((cli.exposure - 1.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn raster_exposure_parses() {
+        let cli = Cli::parse_from(["cherry-app", "--raster-exposure=0.4"]);
+        assert!((cli.raster_exposure - 0.4).abs() < f32::EPSILON);
     }
 
     #[test]

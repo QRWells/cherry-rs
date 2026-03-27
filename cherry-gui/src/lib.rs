@@ -32,6 +32,7 @@ pub struct RenderParams {
     pub rr_min_survival: f32,
     pub indirect_clamp: f32,
     pub direct_lighting: bool,
+    pub raster_exposure: f32,
     pub cpu_threads: Option<usize>,
     pub init_gpu: bool,
     pub camera_look_from_x: f32,
@@ -60,6 +61,7 @@ impl Default for RenderParams {
             rr_min_survival: 0.05,
             indirect_clamp: 10.0,
             direct_lighting: true,
+            raster_exposure: 1.0,
             cpu_threads: None,
             init_gpu: false,
             camera_look_from_x: 0.0,
@@ -286,6 +288,7 @@ impl PreparedRenderJob {
             request,
             runtime_config: RuntimeRenderConfig {
                 exposure: DEFAULT_SPECTRAL_EXPOSURE,
+                raster_exposure: params.raster_exposure,
                 cpu_threads: params.cpu_threads,
             },
             init_gpu: params.init_gpu,
@@ -517,6 +520,7 @@ impl CherryGuiApp {
     fn new() -> Self {
         let backend_options = build_registry_with_config(RuntimeRenderConfig {
             exposure: DEFAULT_SPECTRAL_EXPOSURE,
+            raster_exposure: 1.0,
             cpu_threads: None,
         })
         .list_ids()
@@ -929,6 +933,14 @@ impl CherryGuiApp {
                         );
                     });
                     ui.horizontal(|ui| {
+                        ui.label("Raster Exposure");
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.raster_exposure)
+                                .range(0.01..=16.0)
+                                .speed(0.05),
+                        );
+                    });
+                    ui.horizontal(|ui| {
                         ui.label("Max Bounces");
                         ui.add(
                             egui::DragValue::new(&mut self.state.params.max_bounces).range(1..=64),
@@ -1064,9 +1076,11 @@ impl CherryGuiApp {
 
                 ui.separator();
                 ui.heading("Preview Notes");
-                ui.label("Preview uses raster.simple for fast geometry and base-color feedback.");
                 ui.label(
-                    "Authored lights, shadows, and higher-fidelity material behavior still require Render.",
+                    "Preview uses raster.simple for deterministic lighting, hard shadows, transparency, and tone-mapped draft feedback.",
+                );
+                ui.label(
+                    "Final multi-sample fidelity, full path tracing, and spectral output still require Render.",
                 );
             });
     }
@@ -1323,6 +1337,7 @@ mod tests {
         assert!((params.rr_min_survival - 0.05).abs() < f32::EPSILON);
         assert!((params.indirect_clamp - 10.0).abs() < f32::EPSILON);
         assert!(params.direct_lighting);
+        assert!((params.raster_exposure - 1.0).abs() < f32::EPSILON);
         assert_eq!(params.cpu_threads, None);
         assert!(!params.init_gpu);
         assert!((params.camera_look_from_z - 2.6).abs() < f32::EPSILON);
@@ -1449,6 +1464,7 @@ mod tests {
                 .expect("preview job should prepare");
 
         assert_eq!(job.backend_id.as_str(), "raster.simple");
+        assert!((job.runtime_config.raster_exposure - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

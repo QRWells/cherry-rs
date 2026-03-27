@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use cherry_backend_raster::register_backends_with_threads as register_raster_backends_with_threads;
+use cherry_backend_raster::{
+    RasterBackendConfig, register_backends_with_config as register_raster_backends_with_config,
+};
 use cherry_backend_ray::register_backends_with_exposure_and_threads as register_ray_backends_with_exposure_and_threads;
 use cherry_core::{
     Bsdf, Camera, Color, Cuboid, GltfMrBsdf, PointSpectralLight, SceneProvider, SceneSnapshot,
@@ -9,10 +11,12 @@ use cherry_render::BackendRegistry;
 use nalgebra::{Point3, Vector3};
 
 pub const DEFAULT_SPECTRAL_EXPOSURE: f32 = 0.2;
+pub const DEFAULT_RASTER_EXPOSURE: f32 = 1.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeRenderConfig {
     pub exposure: f32,
+    pub raster_exposure: f32,
     pub cpu_threads: Option<usize>,
 }
 
@@ -20,6 +24,7 @@ impl Default for RuntimeRenderConfig {
     fn default() -> Self {
         Self {
             exposure: DEFAULT_SPECTRAL_EXPOSURE,
+            raster_exposure: 1.0,
             cpu_threads: None,
         }
     }
@@ -293,13 +298,20 @@ pub fn build_animated_scene_provider_with_camera(
 pub fn build_registry(exposure: f32) -> BackendRegistry {
     build_registry_with_config(RuntimeRenderConfig {
         exposure,
+        raster_exposure: DEFAULT_RASTER_EXPOSURE,
         cpu_threads: None,
     })
 }
 
 pub fn build_registry_with_config(config: RuntimeRenderConfig) -> BackendRegistry {
     let mut registry = BackendRegistry::new();
-    register_raster_backends_with_threads(&mut registry, config.cpu_threads);
+    register_raster_backends_with_config(
+        &mut registry,
+        RasterBackendConfig {
+            cpu_threads: config.cpu_threads,
+            exposure: config.raster_exposure,
+        },
+    );
     register_ray_backends_with_exposure_and_threads(
         &mut registry,
         config.exposure,
@@ -385,6 +397,7 @@ mod tests {
     fn runtime_registry_with_config_contains_expected_backends() {
         let registry = super::build_registry_with_config(super::RuntimeRenderConfig {
             exposure: 0.35,
+            raster_exposure: 0.8,
             cpu_threads: Some(2),
         });
         let ids = registry
@@ -473,5 +486,13 @@ mod tests {
         let scene = provider.snapshot(0.0);
 
         assert!((scene.camera.focal_distance() - 1.75).abs() < 1e-5);
+    }
+
+    #[test]
+    fn runtime_render_config_defaults_include_raster_exposure() {
+        let config = super::RuntimeRenderConfig::default();
+        assert!((config.exposure - super::DEFAULT_SPECTRAL_EXPOSURE).abs() < f32::EPSILON);
+        assert!((config.raster_exposure - 1.0).abs() < f32::EPSILON);
+        assert_eq!(config.cpu_threads, None);
     }
 }

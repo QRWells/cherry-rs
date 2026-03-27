@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let registry = build_registry_with_config(RuntimeRenderConfig {
         exposure: cli.exposure,
+        raster_exposure: cli.raster_exposure,
         cpu_threads: cli.cpu_threads,
     });
     let available_backends = registry

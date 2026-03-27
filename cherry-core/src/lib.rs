@@ -17,7 +17,7 @@ pub use intersection::Hit;
 pub use light::{DirectionalSpectralLight, Light, PointSpectralLight, SpectralLight};
 pub use material::{
     Bsdf, BsdfEvalQuery, BsdfLobeKind, BsdfSampleInput, BsdfSampleQuery, BsdfSampleRgb,
-    BsdfSampleSpectral, GltfMrBsdf,
+    BsdfSampleSpectral, GltfMrBsdf, PreviewMaterial,
 };
 pub use primitive::{Cuboid, Primitive, Sphere};
 pub use ray::Ray;
