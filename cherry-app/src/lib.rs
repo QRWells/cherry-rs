@@ -25,6 +25,109 @@ impl Default for RuntimeRenderConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CameraConfig {
+    pub look_from: Point3<f32>,
+    pub look_at: Point3<f32>,
+    pub view_up: Vector3<f32>,
+    pub fov_degrees: f32,
+    pub aperture: f32,
+    pub focal_distance: Option<f32>,
+}
+
+impl Default for CameraConfig {
+    fn default() -> Self {
+        Self {
+            look_from: Point3::new(0.0, 0.0, 2.6),
+            look_at: Point3::new(0.0, -0.1, -0.25),
+            view_up: Vector3::new(0.0, 1.0, 0.0),
+            fov_degrees: 38.0,
+            aperture: 0.0,
+            focal_distance: None,
+        }
+    }
+}
+
+impl CameraConfig {
+    pub fn resolved_focal_distance(&self) -> f32 {
+        self.focal_distance
+            .unwrap_or_else(|| (self.look_from - self.look_at).norm())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !self
+            .look_from
+            .coords
+            .iter()
+            .all(|component| component.is_finite())
+        {
+            return Err("camera look_from must contain finite values".to_string());
+        }
+        if !self
+            .look_at
+            .coords
+            .iter()
+            .all(|component| component.is_finite())
+        {
+            return Err("camera look_at must contain finite values".to_string());
+        }
+        if !self.view_up.iter().all(|component| component.is_finite()) {
+            return Err("camera view_up must contain finite values".to_string());
+        }
+
+        if !self.fov_degrees.is_finite() || self.fov_degrees <= 0.0 || self.fov_degrees >= 179.0 {
+            return Err("camera fov must be finite and in (0, 179) degrees".to_string());
+        }
+
+        if !self.aperture.is_finite() || self.aperture < 0.0 {
+            return Err("camera aperture must be finite and >= 0".to_string());
+        }
+
+        let view_direction = self.look_at - self.look_from;
+        if view_direction.norm_squared() <= 1e-12 {
+            return Err("camera look_from and look_at must not be identical".to_string());
+        }
+
+        if self.view_up.norm_squared() <= 1e-12 {
+            return Err("camera view_up must be non-zero".to_string());
+        }
+
+        if self.view_up.cross(&view_direction).norm_squared() <= 1e-12 {
+            return Err("camera view_up must not be parallel to viewing direction".to_string());
+        }
+
+        if let Some(distance) = self.focal_distance
+            && (!distance.is_finite() || distance <= 0.0)
+        {
+            return Err("camera focal_distance must be finite and > 0".to_string());
+        }
+
+        let resolved = self.resolved_focal_distance();
+        if !resolved.is_finite() || resolved <= 0.0 {
+            return Err("camera focal_distance must resolve to a finite value > 0".to_string());
+        }
+
+        Ok(())
+    }
+
+    pub fn to_camera(&self, aspect_ratio: f32) -> Result<Camera, String> {
+        self.validate()?;
+        if !aspect_ratio.is_finite() || aspect_ratio <= 0.0 {
+            return Err("camera aspect ratio must be finite and > 0".to_string());
+        }
+
+        Ok(Camera::new(
+            self.look_from,
+            self.look_at,
+            self.view_up,
+            self.fov_degrees,
+            aspect_ratio,
+            self.aperture,
+            self.resolved_focal_distance(),
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuInitInfo {
     pub adapter_name: String,
@@ -75,7 +178,8 @@ where
 }
 
 pub struct AnimatedSceneProvider {
-    camera: Camera,
+    camera_config: CameraConfig,
+    aspect_ratio: f32,
     white_material: Arc<dyn Bsdf>,
     red_material: Arc<dyn Bsdf>,
     green_material: Arc<dyn Bsdf>,
@@ -85,18 +189,19 @@ pub struct AnimatedSceneProvider {
 
 impl AnimatedSceneProvider {
     pub fn new(aspect_ratio: f32) -> Self {
-        let camera = Camera::new(
-            Point3::new(0.0, 0.0, 2.6),
-            Point3::new(0.0, -0.1, -0.25),
-            Vector3::y_axis().into_inner(),
-            38.0,
-            aspect_ratio,
-            0.0,
-            1.0,
-        );
+        Self::with_camera_config(aspect_ratio, CameraConfig::default())
+            .expect("default camera config must be valid")
+    }
 
-        Self {
-            camera,
+    pub fn with_camera_config(
+        aspect_ratio: f32,
+        camera_config: CameraConfig,
+    ) -> Result<Self, String> {
+        camera_config.to_camera(aspect_ratio)?;
+
+        Ok(Self {
+            camera_config,
+            aspect_ratio,
             white_material: Arc::new(GltfMrBsdf::opaque(Color::new(0.73, 0.73, 0.73), 0.0, 0.55)),
             red_material: Arc::new(GltfMrBsdf::opaque(Color::new(0.63, 0.07, 0.06), 0.0, 0.6)),
             green_material: Arc::new(GltfMrBsdf::opaque(Color::new(0.14, 0.45, 0.09), 0.0, 0.6)),
@@ -114,14 +219,20 @@ impl AnimatedSceneProvider {
                 1.0,
                 1.5,
             )),
-        }
+        })
+    }
+
+    fn camera(&self) -> Camera {
+        self.camera_config
+            .to_camera(self.aspect_ratio)
+            .expect("camera config should be validated at provider construction")
     }
 }
 
 impl SceneProvider for AnimatedSceneProvider {
     fn snapshot(&self, _time: f32) -> SceneSnapshot {
         let mut scene =
-            SceneSnapshot::new(self.camera.clone()).with_background(Color::new(0.0, 0.0, 0.0));
+            SceneSnapshot::new(self.camera()).with_background(Color::new(0.0, 0.0, 0.0));
 
         scene.add_primitive(Arc::new(Cuboid::new(
             Point3::new(-1.0, -1.0, -1.0),
@@ -170,6 +281,13 @@ impl SceneProvider for AnimatedSceneProvider {
 
 pub fn build_animated_scene_provider(aspect_ratio: f32) -> AnimatedSceneProvider {
     AnimatedSceneProvider::new(aspect_ratio)
+}
+
+pub fn build_animated_scene_provider_with_camera(
+    aspect_ratio: f32,
+    camera_config: CameraConfig,
+) -> Result<AnimatedSceneProvider, String> {
+    AnimatedSceneProvider::with_camera_config(aspect_ratio, camera_config)
 }
 
 pub fn build_registry(exposure: f32) -> BackendRegistry {
@@ -222,7 +340,7 @@ pub fn output_filename(backend_id: &str, frame_index: Option<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use cherry_core::{Color, SceneProvider};
-    use nalgebra::Vector2;
+    use nalgebra::{Point3, Vector2, Vector3};
 
     use super::output_filename;
 
@@ -314,5 +432,46 @@ mod tests {
             "expected static Cornell default scene to produce identical center hit distances"
         );
         assert!(hit_t0.distance > 0.0);
+    }
+
+    #[test]
+    fn default_camera_config_matches_current_scene_defaults() {
+        let config = super::CameraConfig::default();
+        assert_eq!(config.look_from, Point3::new(0.0, 0.0, 2.6));
+        assert_eq!(config.look_at, Point3::new(0.0, -0.1, -0.25));
+        assert_eq!(config.view_up, Vector3::new(0.0, 1.0, 0.0));
+        assert!((config.fov_degrees - 38.0).abs() < f32::EPSILON);
+        assert!((config.aperture - 0.0).abs() < f32::EPSILON);
+        assert!(config.focal_distance.is_none());
+    }
+
+    #[test]
+    fn camera_config_auto_focal_distance_uses_look_from_to_look_at_distance() {
+        let config = super::CameraConfig {
+            look_from: Point3::new(0.0, 0.0, 3.0),
+            look_at: Point3::new(0.0, 0.0, 0.0),
+            view_up: Vector3::new(0.0, 1.0, 0.0),
+            fov_degrees: 45.0,
+            aperture: 0.1,
+            focal_distance: None,
+        };
+
+        let camera = config
+            .to_camera(1.0)
+            .expect("camera config should be valid");
+        assert!((camera.focal_distance() - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn build_animated_scene_provider_with_camera_preserves_explicit_focal_distance() {
+        let config = super::CameraConfig {
+            focal_distance: Some(1.75),
+            ..super::CameraConfig::default()
+        };
+        let provider = super::build_animated_scene_provider_with_camera(16.0 / 9.0, config)
+            .expect("camera configuration should be valid");
+        let scene = provider.snapshot(0.0);
+
+        assert!((scene.camera.focal_distance() - 1.75).abs() < 1e-5);
     }
 }

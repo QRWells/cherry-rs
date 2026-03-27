@@ -46,7 +46,13 @@ pub fn render_frame(
     let backend = registry
         .create(backend_id)
         .ok_or_else(|| RenderError::BackendNotFound(backend_id.clone()))?;
-    let scene = scene_provider.snapshot(request.time);
+    let mut scene = scene_provider.snapshot(request.time);
+    let aspect_ratio = if request.height == 0 {
+        1.0
+    } else {
+        request.width as f32 / request.height as f32
+    };
+    scene.camera = scene.camera.with_aspect_ratio(aspect_ratio);
     Ok(backend.render_frame(&scene, request, sink))
 }
 

@@ -7,7 +7,7 @@ use cherry_render::{
     NoopFrameSink, PixelRadiance, RenderBackend, RenderStats, SPECTRAL_BIN_COUNT, SequenceSpec,
     TypedScanline, render_frame, render_sequence,
 };
-use nalgebra::{Point3, Vector3};
+use nalgebra::{Point3, Vector2, Vector3};
 
 struct MockSceneProvider {
     calls: Arc<Mutex<Vec<f32>>>,
@@ -68,6 +68,49 @@ impl RenderBackend for MockBackend {
 
         RenderStats {
             backend_id: BackendId::new("mock"),
+            frame_index: request.frame_index,
+            elapsed: Duration::from_millis(1),
+            samples_per_pixel: request.samples_per_pixel,
+        }
+    }
+}
+
+struct CameraProbeBackend {
+    ray_dir_probe: Arc<Mutex<Option<Vector3<f32>>>>,
+}
+
+impl RenderBackend for CameraProbeBackend {
+    type Pixel = Color;
+
+    fn metadata(&self) -> BackendMetadata {
+        BackendMetadata {
+            id: BackendId::new("mock.camera-probe"),
+            display_name: "Mock Camera Probe Backend".to_string(),
+            capabilities: BackendCapabilities {
+                progressive_updates: false,
+                gpu_ready_interface: false,
+            },
+        }
+    }
+
+    fn render_scanlines(
+        &self,
+        scene: &SceneSnapshot,
+        request: &FrameRequest,
+        emit_scanline: &mut dyn FnMut(TypedScanline<Self::Pixel>),
+    ) -> RenderStats {
+        let ray = scene.camera.generate_ray(Vector2::new(1.0, 0.5));
+        *self.ray_dir_probe.lock().unwrap() = Some(ray.dir);
+
+        for y in 0..request.height {
+            emit_scanline(TypedScanline {
+                y,
+                pixels: vec![Color::new(0.0, 0.0, 0.0); request.width as usize],
+            });
+        }
+
+        RenderStats {
+            backend_id: BackendId::new("mock.camera-probe"),
             frame_index: request.frame_index,
             elapsed: Duration::from_millis(1),
             samples_per_pixel: request.samples_per_pixel,
@@ -162,6 +205,20 @@ fn register_mock_spectral_backend(registry: &mut BackendRegistry) {
     registry.register_factory(
         BackendId::new("mock.spectral"),
         Arc::new(|| Box::new(MockSpectralBackend)),
+    );
+}
+
+fn register_camera_probe_backend(
+    registry: &mut BackendRegistry,
+    ray_dir_probe: Arc<Mutex<Option<Vector3<f32>>>>,
+) {
+    registry.register_factory(
+        BackendId::new("mock.camera-probe"),
+        Arc::new(move || {
+            Box::new(CameraProbeBackend {
+                ray_dir_probe: Arc::clone(&ray_dir_probe),
+            })
+        }),
     );
 }
 
@@ -280,6 +337,69 @@ fn render_sequence_calls_snapshot_with_expected_times() {
 
     let calls = provider.calls.lock().unwrap().clone();
     assert_eq!(calls, vec![1.0, 1.25, 1.5]);
+}
+
+fn approx_vec3(a: Vector3<f32>, b: Vector3<f32>) -> bool {
+    (a - b).norm() <= 1e-5
+}
+
+#[test]
+fn render_frame_reprojects_scene_camera_to_request_aspect_ratio() {
+    let mut registry = BackendRegistry::new();
+    let ray_dir_probe = Arc::new(Mutex::new(None));
+    register_camera_probe_backend(&mut registry, Arc::clone(&ray_dir_probe));
+    let provider = MockSceneProvider::new();
+
+    let request = FrameRequest {
+        width: 64,
+        height: 64,
+        frame_index: 0,
+        time: 0.0,
+        samples_per_pixel: 1,
+        max_bounces: 1,
+        path_tracing: Default::default(),
+    };
+
+    let mut sink = NoopFrameSink;
+    let _ = render_frame(
+        &registry,
+        &provider,
+        &BackendId::new("mock.camera-probe"),
+        &request,
+        &mut sink,
+    )
+    .unwrap();
+
+    let probed_ray = ray_dir_probe
+        .lock()
+        .unwrap()
+        .as_ref()
+        .copied()
+        .expect("expected probe backend to capture a ray");
+
+    let base_camera = Camera::new(
+        Point3::new(0.0, 0.0, 3.0),
+        Point3::new(0.0, 0.0, 0.0),
+        Vector3::y_axis().into_inner(),
+        60.0,
+        16.0 / 9.0,
+        0.0,
+        1.0,
+    );
+    let expected_square = base_camera
+        .with_aspect_ratio(request.width as f32 / request.height as f32)
+        .generate_ray(Vector2::new(1.0, 0.5))
+        .dir;
+    let wide_ray = base_camera.generate_ray(Vector2::new(1.0, 0.5)).dir;
+
+    assert!(
+        approx_vec3(probed_ray, expected_square),
+        "expected orchestrator to reproject camera to request aspect ratio"
+    );
+    assert!(
+        !approx_vec3(probed_ray, wide_ray),
+        "expected probed ray to differ from original 16:9 framing"
+    );
 }
 
 struct SpectralDetectSink {
