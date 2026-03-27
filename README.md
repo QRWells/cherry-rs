@@ -48,7 +48,8 @@ GUI workflow notes:
 - `Preview` always uses `raster.simple` for fast draft feedback.
 - `Render` uses the selected backend from the render controls panel.
 - The scene panel supports adding/removing cuboids, spheres, point lights, and directional lights, plus editing `GltfMrBsdf` material inputs.
-- Raster preview is intentionally lightweight: it shows geometry, base color, and background quickly, but does not yet reflect authored lighting, shadows, or higher-fidelity material behavior.
+- Raster preview is intentionally lightweight but now supports authored point/directional lighting, hard shadows, deterministic transmissive preview, emissive materials, and scanline-local tone mapping.
+- Raster preview is still a draft path: it does not attempt stochastic path tracing, caustics, bloom, or spectral output parity with the ray backends.
 
 Use `--spp` (or `--samples-per-pixel`) to control path tracing sampling:
 
@@ -73,6 +74,12 @@ Example with the spectral backend (hero wavelength sampling, CIE XYZ mapping):
 
 ```bash
 cargo run -p cherry-app -- --backend=ray.spectral --spp=8 --exposure=1.25 --frames=1
+```
+
+Use `--raster-exposure` to control the tone-mapped output of `raster.simple` without changing ray-backend exposure:
+
+```bash
+cargo run -p cherry-app -- --backend=raster.simple --raster-exposure=0.8 --frames=1
 ```
 
 Use `--init-gpu` to run `wgpu` adapter/device initialization at render start:

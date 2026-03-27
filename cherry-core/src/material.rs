@@ -56,6 +56,29 @@ pub struct BsdfSampleSpectral {
     pub lobe: BsdfLobeKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreviewMaterial {
+    pub base_color: Color,
+    pub emissive: Color,
+    pub metallic: f32,
+    pub roughness: f32,
+    pub transmission: f32,
+    pub ior: f32,
+}
+
+impl PreviewMaterial {
+    pub fn opaque(base_color: Color, emissive: Color) -> Self {
+        Self {
+            base_color,
+            emissive,
+            metallic: 0.0,
+            roughness: 1.0,
+            transmission: 0.0,
+            ior: 1.0,
+        }
+    }
+}
+
 /// Core material scattering contract used by all render backends.
 ///
 /// `outgoing` and `incoming` directions are expected to point away from the
@@ -65,6 +88,10 @@ pub trait Bsdf: Send + Sync {
 
     fn emissive_rgb(&self) -> Color {
         Color::new(0.0, 0.0, 0.0)
+    }
+
+    fn preview_material(&self) -> PreviewMaterial {
+        PreviewMaterial::opaque(self.preview_base_color(), self.emissive_rgb())
     }
 
     fn emissive_at_nm(&self, wavelength_nm: f32) -> f32 {
@@ -488,6 +515,17 @@ impl Bsdf for GltfMrBsdf {
         self.emissive
     }
 
+    fn preview_material(&self) -> PreviewMaterial {
+        PreviewMaterial {
+            base_color: self.base_color,
+            emissive: self.emissive,
+            metallic: self.metallic,
+            roughness: self.roughness,
+            transmission: self.transmission,
+            ior: self.ior,
+        }
+    }
+
     fn emissive_at_nm(&self, wavelength_nm: f32) -> f32 {
         self.emissive_spectrum
             .sample_clamped(wavelength_nm)
@@ -835,14 +873,62 @@ fn ggx_transmission_pdf(
 #[cfg(test)]
 mod tests {
     use super::{
-        Bsdf, BsdfEvalQuery, BsdfSampleInput, BsdfSampleQuery, GltfMrBsdf, fresnel_dielectric,
-        refract_direction,
+        Bsdf, BsdfEvalQuery, BsdfSampleInput, BsdfSampleQuery, GltfMrBsdf, PreviewMaterial,
+        fresnel_dielectric, refract_direction,
     };
     use crate::Color;
     use nalgebra::Vector3;
 
     fn v(x: f32, y: f32, z: f32) -> Vector3<f32> {
         Vector3::new(x, y, z).normalize()
+    }
+
+    struct MinimalBsdf {
+        color: Color,
+        emissive: Color,
+    }
+
+    impl Bsdf for MinimalBsdf {
+        fn preview_base_color(&self) -> Color {
+            self.color
+        }
+
+        fn emissive_rgb(&self) -> Color {
+            self.emissive
+        }
+
+        fn eval(&self, _query: &BsdfEvalQuery) -> Color {
+            Color::new(0.0, 0.0, 0.0)
+        }
+
+        fn pdf(&self, _query: &BsdfEvalQuery) -> f32 {
+            0.0
+        }
+
+        fn sample(
+            &self,
+            _query: &BsdfSampleQuery,
+            _sample: BsdfSampleInput,
+        ) -> Option<super::BsdfSampleRgb> {
+            None
+        }
+
+        fn eval_spectral(&self, _query: &BsdfEvalQuery, _wavelength_nm: f32) -> f32 {
+            0.0
+        }
+
+        fn pdf_spectral(&self, _query: &BsdfEvalQuery, _wavelength_nm: f32) -> f32 {
+            0.0
+        }
+
+        fn sample_spectral(
+            &self,
+            _query: &BsdfSampleQuery,
+            _sample: BsdfSampleInput,
+            _wavelength_nm: f32,
+        ) -> Option<super::BsdfSampleSpectral> {
+            None
+        }
     }
 
     #[test]
@@ -953,5 +1039,49 @@ mod tests {
         let value = bsdf.eval_spectral(&query, 550.0);
         assert!(value.is_finite());
         assert!(value >= 0.0);
+    }
+
+    #[test]
+    fn preview_material_defaults_to_opaque_surface() {
+        let bsdf = MinimalBsdf {
+            color: Color::new(0.4, 0.5, 0.6),
+            emissive: Color::new(0.1, 0.2, 0.3),
+        };
+
+        assert_eq!(
+            bsdf.preview_material(),
+            PreviewMaterial {
+                base_color: Color::new(0.4, 0.5, 0.6),
+                emissive: Color::new(0.1, 0.2, 0.3),
+                metallic: 0.0,
+                roughness: 1.0,
+                transmission: 0.0,
+                ior: 1.0,
+            }
+        );
+    }
+
+    #[test]
+    fn gltf_preview_material_exposes_authored_transport_values() {
+        let bsdf = GltfMrBsdf::new(
+            Color::new(0.8, 0.7, 0.6),
+            0.25,
+            0.3,
+            Color::new(0.05, 0.04, 0.03),
+            0.85,
+            1.45,
+        );
+
+        assert_eq!(
+            bsdf.preview_material(),
+            PreviewMaterial {
+                base_color: Color::new(0.8, 0.7, 0.6),
+                emissive: Color::new(0.05, 0.04, 0.03),
+                metallic: 0.25,
+                roughness: 0.3,
+                transmission: 0.85,
+                ior: 1.45,
+            }
+        );
     }
 }
