@@ -27,6 +27,8 @@ modular BSDF-based PBR shading and a spectral ray-tracing path.
 cargo run -p cherry-app -- --backend=ray.normal --width=640 --height=360 --frames=1
 ```
 
+Camera framing now always follows the render resolution (`width / height`) for each frame.
+
 Animation frames (PNG sequence):
 
 ```bash
@@ -69,6 +71,12 @@ Use `--init-gpu` to run `wgpu` adapter/device initialization at render start:
 
 ```bash
 cargo run -p cherry-app -- --backend=ray.normal --init-gpu --frames=1
+```
+
+Use camera controls (pose + optics) from CLI:
+
+```bash
+cargo run -p cherry-app -- --backend=ray.normal --width=640 --height=400 --camera-look-from-z=3.2 --camera-look-at-y=-0.05 --camera-fov=45 --camera-aperture=0.08 --camera-focal-distance=3.2 --frames=1
 ```
 
 Inspect CLI options:

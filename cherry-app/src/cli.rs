@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, error::ErrorKind};
+use nalgebra::{Point3, Vector3};
 
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -68,6 +69,34 @@ pub struct Cli {
     #[arg(long, default_value = "output")]
     pub output_dir: PathBuf,
 
+    #[arg(long = "camera-look-from-x", default_value_t = 0.0, value_parser = parse_finite_f32)]
+    pub camera_look_from_x: f32,
+    #[arg(long = "camera-look-from-y", default_value_t = 0.0, value_parser = parse_finite_f32)]
+    pub camera_look_from_y: f32,
+    #[arg(long = "camera-look-from-z", default_value_t = 2.6, value_parser = parse_finite_f32)]
+    pub camera_look_from_z: f32,
+
+    #[arg(long = "camera-look-at-x", default_value_t = 0.0, value_parser = parse_finite_f32)]
+    pub camera_look_at_x: f32,
+    #[arg(long = "camera-look-at-y", default_value_t = -0.1, value_parser = parse_finite_f32)]
+    pub camera_look_at_y: f32,
+    #[arg(long = "camera-look-at-z", default_value_t = -0.25, value_parser = parse_finite_f32)]
+    pub camera_look_at_z: f32,
+
+    #[arg(long = "camera-view-up-x", default_value_t = 0.0, value_parser = parse_finite_f32)]
+    pub camera_view_up_x: f32,
+    #[arg(long = "camera-view-up-y", default_value_t = 1.0, value_parser = parse_finite_f32)]
+    pub camera_view_up_y: f32,
+    #[arg(long = "camera-view-up-z", default_value_t = 0.0, value_parser = parse_finite_f32)]
+    pub camera_view_up_z: f32,
+
+    #[arg(long = "camera-fov", default_value_t = 38.0, value_parser = parse_finite_f32)]
+    pub camera_fov: f32,
+    #[arg(long = "camera-aperture", default_value_t = 0.0, value_parser = parse_non_negative_f32)]
+    pub camera_aperture: f32,
+    #[arg(long = "camera-focal-distance", value_parser = parse_positive_f32)]
+    pub camera_focal_distance: Option<f32>,
+
     #[command(subcommand)]
     pub command: Option<FutureCommand>,
 }
@@ -86,6 +115,40 @@ impl FutureCommand {
             Self::Benchmark => "TODO: benchmark workflow is not implemented yet.",
             Self::Scene => "TODO: scene workflow is not implemented yet.",
         }
+    }
+}
+
+impl Cli {
+    pub fn camera_config(&self) -> Result<cherry_app::CameraConfig, clap::Error> {
+        let config = cherry_app::CameraConfig {
+            look_from: Point3::new(
+                self.camera_look_from_x,
+                self.camera_look_from_y,
+                self.camera_look_from_z,
+            ),
+            look_at: Point3::new(
+                self.camera_look_at_x,
+                self.camera_look_at_y,
+                self.camera_look_at_z,
+            ),
+            view_up: Vector3::new(
+                self.camera_view_up_x,
+                self.camera_view_up_y,
+                self.camera_view_up_z,
+            ),
+            fov_degrees: self.camera_fov,
+            aperture: self.camera_aperture,
+            focal_distance: self.camera_focal_distance,
+        };
+
+        if let Err(message) = config.validate() {
+            return Err(Cli::command().error(
+                ErrorKind::ValueValidation,
+                format!("invalid camera configuration: {message}"),
+            ));
+        }
+
+        Ok(config)
     }
 }
 
@@ -131,6 +194,32 @@ fn parse_rr_min_survival(raw: &str) -> Result<f32, String> {
     Ok(parsed)
 }
 
+fn parse_finite_f32(raw: &str) -> Result<f32, String> {
+    let parsed = raw
+        .parse::<f32>()
+        .map_err(|_| format!("invalid floating-point value '{raw}'"))?;
+    if !parsed.is_finite() {
+        return Err(format!("value '{raw}' must be finite"));
+    }
+    Ok(parsed)
+}
+
+fn parse_non_negative_f32(raw: &str) -> Result<f32, String> {
+    let parsed = parse_finite_f32(raw)?;
+    if parsed < 0.0 {
+        return Err(format!("value '{raw}' must be >= 0"));
+    }
+    Ok(parsed)
+}
+
+fn parse_positive_f32(raw: &str) -> Result<f32, String> {
+    let parsed = parse_finite_f32(raw)?;
+    if parsed <= 0.0 {
+        return Err(format!("value '{raw}' must be > 0"));
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -154,6 +243,18 @@ mod tests {
         assert!(cli.cpu_threads.is_none());
         assert!(!cli.init_gpu);
         assert_eq!(cli.output_dir.to_string_lossy(), "output");
+        assert!((cli.camera_look_from_x - 0.0).abs() < f32::EPSILON);
+        assert!((cli.camera_look_from_y - 0.0).abs() < f32::EPSILON);
+        assert!((cli.camera_look_from_z - 2.6).abs() < f32::EPSILON);
+        assert!((cli.camera_look_at_x - 0.0).abs() < f32::EPSILON);
+        assert!((cli.camera_look_at_y + 0.1).abs() < f32::EPSILON);
+        assert!((cli.camera_look_at_z + 0.25).abs() < f32::EPSILON);
+        assert!((cli.camera_view_up_x - 0.0).abs() < f32::EPSILON);
+        assert!((cli.camera_view_up_y - 1.0).abs() < f32::EPSILON);
+        assert!((cli.camera_view_up_z - 0.0).abs() < f32::EPSILON);
+        assert!((cli.camera_fov - 38.0).abs() < f32::EPSILON);
+        assert!((cli.camera_aperture - 0.0).abs() < f32::EPSILON);
+        assert!(cli.camera_focal_distance.is_none());
         assert!(cli.command.is_none());
     }
 
@@ -191,6 +292,36 @@ mod tests {
         let cli = Cli::parse_from(["cherry-app", "--cpu-threads=6", "--init-gpu"]);
         assert_eq!(cli.cpu_threads, Some(6));
         assert!(cli.init_gpu);
+    }
+
+    #[test]
+    fn camera_controls_parse() {
+        let cli = Cli::parse_from([
+            "cherry-app",
+            "--camera-look-from-x=1.0",
+            "--camera-look-from-y=2.0",
+            "--camera-look-from-z=3.0",
+            "--camera-look-at-x=0.5",
+            "--camera-look-at-y=0.0",
+            "--camera-look-at-z=-0.5",
+            "--camera-view-up-x=0.0",
+            "--camera-view-up-y=1.0",
+            "--camera-view-up-z=0.1",
+            "--camera-fov=50.0",
+            "--camera-aperture=0.2",
+            "--camera-focal-distance=2.5",
+        ]);
+
+        assert!((cli.camera_look_from_x - 1.0).abs() < f32::EPSILON);
+        assert!((cli.camera_look_from_y - 2.0).abs() < f32::EPSILON);
+        assert!((cli.camera_look_from_z - 3.0).abs() < f32::EPSILON);
+        assert!((cli.camera_look_at_x - 0.5).abs() < f32::EPSILON);
+        assert!((cli.camera_look_at_y - 0.0).abs() < f32::EPSILON);
+        assert!((cli.camera_look_at_z + 0.5).abs() < f32::EPSILON);
+        assert!((cli.camera_view_up_z - 0.1).abs() < f32::EPSILON);
+        assert!((cli.camera_fov - 50.0).abs() < f32::EPSILON);
+        assert!((cli.camera_aperture - 0.2).abs() < f32::EPSILON);
+        assert_eq!(cli.camera_focal_distance, Some(2.5));
     }
 
     #[test]
@@ -245,5 +376,22 @@ mod tests {
         assert!(rendered.contains("ray.unknown"));
         assert!(rendered.contains("raster.simple"));
         assert!(rendered.contains("ray.normal"));
+    }
+
+    #[test]
+    fn camera_validation_rejects_degenerate_view_basis() {
+        let cli = Cli::parse_from([
+            "cherry-app",
+            "--camera-look-from-x=0.0",
+            "--camera-look-from-y=0.0",
+            "--camera-look-from-z=0.0",
+            "--camera-look-at-x=0.0",
+            "--camera-look-at-y=0.0",
+            "--camera-look-at-z=0.0",
+        ]);
+
+        let err = cli.camera_config().unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(err.to_string().contains("camera"));
     }
 }

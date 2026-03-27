@@ -9,3 +9,4 @@ cherry-app = { path = "../cherry-app" }
 cherry-core = { path = "../cherry-core" }
 cherry-render = { path = "../cherry-render" }
 eframe = "0.31"
+nalgebra.workspace = true

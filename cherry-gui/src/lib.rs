@@ -5,12 +5,13 @@ use std::{
 };
 
 use cherry_app::{
-    DEFAULT_SPECTRAL_EXPOSURE, RuntimeRenderConfig, build_animated_scene_provider,
-    build_registry_with_config, initialize_gpu,
+    CameraConfig, DEFAULT_SPECTRAL_EXPOSURE, RuntimeRenderConfig,
+    build_animated_scene_provider_with_camera, build_registry_with_config, initialize_gpu,
 };
 use cherry_core::{Color, FrameRequest, PathTracingConfig};
 use cherry_render::{BackendId, FrameEvent, FrameSink, RenderStats, color_to_rgb8, render_frame};
 use eframe::egui;
+use nalgebra::{Point3, Vector3};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderParams {
@@ -25,6 +26,18 @@ pub struct RenderParams {
     pub direct_lighting: bool,
     pub cpu_threads: Option<usize>,
     pub init_gpu: bool,
+    pub camera_look_from_x: f32,
+    pub camera_look_from_y: f32,
+    pub camera_look_from_z: f32,
+    pub camera_look_at_x: f32,
+    pub camera_look_at_y: f32,
+    pub camera_look_at_z: f32,
+    pub camera_view_up_x: f32,
+    pub camera_view_up_y: f32,
+    pub camera_view_up_z: f32,
+    pub camera_fov_degrees: f32,
+    pub camera_aperture: f32,
+    pub camera_focal_distance: Option<f32>,
 }
 
 impl Default for RenderParams {
@@ -41,6 +54,43 @@ impl Default for RenderParams {
             direct_lighting: true,
             cpu_threads: None,
             init_gpu: false,
+            camera_look_from_x: 0.0,
+            camera_look_from_y: 0.0,
+            camera_look_from_z: 2.6,
+            camera_look_at_x: 0.0,
+            camera_look_at_y: -0.1,
+            camera_look_at_z: -0.25,
+            camera_view_up_x: 0.0,
+            camera_view_up_y: 1.0,
+            camera_view_up_z: 0.0,
+            camera_fov_degrees: 38.0,
+            camera_aperture: 0.0,
+            camera_focal_distance: None,
+        }
+    }
+}
+
+impl RenderParams {
+    fn camera_config(&self) -> CameraConfig {
+        CameraConfig {
+            look_from: Point3::new(
+                self.camera_look_from_x,
+                self.camera_look_from_y,
+                self.camera_look_from_z,
+            ),
+            look_at: Point3::new(
+                self.camera_look_at_x,
+                self.camera_look_at_y,
+                self.camera_look_at_z,
+            ),
+            view_up: Vector3::new(
+                self.camera_view_up_x,
+                self.camera_view_up_y,
+                self.camera_view_up_z,
+            ),
+            fov_degrees: self.camera_fov_degrees,
+            aperture: self.camera_aperture,
+            focal_distance: self.camera_focal_distance,
         }
     }
 }
@@ -258,7 +308,18 @@ fn run_render_job_with_initializer(
         exposure: DEFAULT_SPECTRAL_EXPOSURE,
         cpu_threads: params.cpu_threads,
     });
-    let provider = build_animated_scene_provider(params.width as f32 / params.height as f32);
+    let provider = match build_animated_scene_provider_with_camera(
+        params.width as f32 / params.height as f32,
+        params.camera_config(),
+    ) {
+        Ok(provider) => provider,
+        Err(message) => {
+            let _ = tx.send(WorkerMessage::Error(format!(
+                "invalid camera configuration: {message}"
+            )));
+            return;
+        }
+    };
     let backend_id = BackendId::new(params.backend_id);
 
     let request = FrameRequest {
@@ -485,6 +546,100 @@ impl CherryGuiApp {
                             egui::DragValue::new(&mut self.state.params.max_bounces).range(1..=64),
                         );
                     });
+
+                    ui.separator();
+                    ui.label("Camera");
+                    ui.horizontal(|ui| {
+                        ui.label("Look From");
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.camera_look_from_x)
+                                .speed(0.01),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.camera_look_from_y)
+                                .speed(0.01),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.camera_look_from_z)
+                                .speed(0.01),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Look At");
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.camera_look_at_x)
+                                .speed(0.01),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.camera_look_at_y)
+                                .speed(0.01),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.camera_look_at_z)
+                                .speed(0.01),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("View Up");
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.camera_view_up_x)
+                                .speed(0.01),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.camera_view_up_y)
+                                .speed(0.01),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.camera_view_up_z)
+                                .speed(0.01),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("FOV");
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.camera_fov_degrees)
+                                .range(1.0..=179.0)
+                                .speed(0.1),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Aperture");
+                        ui.add(
+                            egui::DragValue::new(&mut self.state.params.camera_aperture)
+                                .range(0.0..=16.0)
+                                .speed(0.01),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        let mut auto_focal = self.state.params.camera_focal_distance.is_none();
+                        if ui
+                            .checkbox(&mut auto_focal, "Auto Focal Distance")
+                            .changed()
+                        {
+                            self.state.params.camera_focal_distance = if auto_focal {
+                                None
+                            } else {
+                                let dx = self.state.params.camera_look_from_x
+                                    - self.state.params.camera_look_at_x;
+                                let dy = self.state.params.camera_look_from_y
+                                    - self.state.params.camera_look_at_y;
+                                let dz = self.state.params.camera_look_from_z
+                                    - self.state.params.camera_look_at_z;
+                                Some((dx * dx + dy * dy + dz * dz).sqrt().max(1e-3))
+                            };
+                        }
+                    });
+                    if let Some(focal_distance) = &mut self.state.params.camera_focal_distance {
+                        ui.horizontal(|ui| {
+                            ui.label("Focal Distance");
+                            ui.add(
+                                egui::DragValue::new(focal_distance)
+                                    .range(0.001..=1_000.0)
+                                    .speed(0.01),
+                            );
+                        });
+                    }
+
                     if supports_path_tracing_controls(&self.state.params.backend_id) {
                         ui.separator();
                         ui.label("Path Tracing");
@@ -728,6 +883,18 @@ mod tests {
             direct_lighting: true,
             cpu_threads: None,
             init_gpu: false,
+            camera_look_from_x: 0.0,
+            camera_look_from_y: 0.0,
+            camera_look_from_z: 2.6,
+            camera_look_at_x: 0.0,
+            camera_look_at_y: -0.1,
+            camera_look_at_z: -0.25,
+            camera_view_up_x: 0.0,
+            camera_view_up_y: 1.0,
+            camera_view_up_z: 0.0,
+            camera_fov_degrees: 38.0,
+            camera_aperture: 0.0,
+            camera_focal_distance: None,
         };
 
         let (tx, rx) = mpsc::channel();
@@ -767,6 +934,8 @@ mod tests {
         assert!(params.direct_lighting);
         assert_eq!(params.cpu_threads, None);
         assert!(!params.init_gpu);
+        assert!((params.camera_look_from_z - 2.6).abs() < f32::EPSILON);
+        assert!(params.camera_focal_distance.is_none());
     }
 
     #[test]
@@ -783,6 +952,18 @@ mod tests {
             direct_lighting: true,
             cpu_threads: None,
             init_gpu: true,
+            camera_look_from_x: 0.0,
+            camera_look_from_y: 0.0,
+            camera_look_from_z: 2.6,
+            camera_look_at_x: 0.0,
+            camera_look_at_y: -0.1,
+            camera_look_at_z: -0.25,
+            camera_view_up_x: 0.0,
+            camera_view_up_y: 1.0,
+            camera_view_up_z: 0.0,
+            camera_fov_degrees: 38.0,
+            camera_aperture: 0.0,
+            camera_focal_distance: None,
         };
 
         let (tx, rx) = mpsc::channel();
@@ -821,6 +1002,18 @@ mod tests {
             direct_lighting: false,
             cpu_threads: None,
             init_gpu: false,
+            camera_look_from_x: 0.0,
+            camera_look_from_y: 0.0,
+            camera_look_from_z: 2.6,
+            camera_look_at_x: 0.0,
+            camera_look_at_y: -0.1,
+            camera_look_at_z: -0.25,
+            camera_view_up_x: 0.0,
+            camera_view_up_y: 1.0,
+            camera_view_up_z: 0.0,
+            camera_fov_degrees: 38.0,
+            camera_aperture: 0.0,
+            camera_focal_distance: None,
         };
 
         let (tx, rx) = mpsc::channel();
@@ -842,5 +1035,13 @@ mod tests {
         assert!((begin_request.path_tracing.rr_min_survival - 0.22).abs() < f32::EPSILON);
         assert!((begin_request.path_tracing.indirect_clamp - 2.75).abs() < f32::EPSILON);
         assert!(!begin_request.path_tracing.direct_lighting);
+    }
+
+    #[test]
+    fn render_params_camera_config_preserves_explicit_focal_distance() {
+        let mut params = RenderParams::default();
+        params.camera_focal_distance = Some(1.75);
+        let config = params.camera_config();
+        assert_eq!(config.focal_distance, Some(1.75));
     }
 }
